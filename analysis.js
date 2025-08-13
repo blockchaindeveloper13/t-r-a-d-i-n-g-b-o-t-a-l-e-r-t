@@ -1,34 +1,26 @@
-const ccxt = require('ccxt');
 const { RSI, MACD, EMA, PSAR, StochasticRSI } = require('technicalindicators');
 const axios = require('axios');
+const { startWebSocket } = require('./websocket');
 
 const COINS = ['AAVE-USDT', 'COMP-USDT', 'LTC-USDT', 'XLM-USDT', 'ADA-USDT', 'MKR-USDT', 'BTC-USDT'];
-const TIMEFRAMES = ['1min', '5min', '30min', '1hour', '2hour', '4hour', '1day', '1week', '1month'];
+const TIMEFRAMES = ['1min', '5min', '30min', '1hour', '2hour', '4hour', '1day', '1week'];
 
-const kucoin = new ccxt.kucoin({
-  apiKey: process.env.KUCOIN_KEY,
-  secret: process.env.KUCOIN_SECRET,
-  enableRateLimit: true,
-});
-
-async function fetchKlines(coin, timeframe, startAt = 0, endAt = 0) {
-  try {
-    const params = { symbol: coin, type: timeframe };
-    if (startAt) params.startAt = startAt;
-    if (endAt) params.endAt = endAt;
-    const response = await axios.get('https://api.kucoin.com/api/v1/market/candles', { params });
-    return response.data.data.map(([time, open, close, high, low, volume, amount]) => ({
-      timestamp: new Date(parseInt(time) * 1000).toISOString(),
-      open: parseFloat(open),
-      high: parseFloat(high),
-      low: parseFloat(low),
-      close: parseFloat(close),
-      volume: parseFloat(volume),
-    }));
-  } catch (error) {
-    console.error(`Klines error for ${coin} (${timeframe}):`, error.message);
-    return [];
-  }
+async function fetchKlines(coin, timeframe) {
+  return new Promise((resolve) => {
+    const klines = [];
+    const ws = startWebSocket(coin, timeframe, (data) => {
+      klines.push(data);
+      if (klines.length >= 200) { // EMA200 için yeterli veri
+        resolve(klines.slice(-200));
+      }
+    });
+    setTimeout(() => {
+      if (klines.length < 200) {
+        console.warn(`Insufficient klines for ${coin}_${timeframe}, got ${klines.length}`);
+        resolve(klines);
+      }
+    }, 30000); // 30 saniye bekle
+  });
 }
 
 function calculateIndicators(data) {
@@ -64,12 +56,13 @@ async function callGrok(prompt) {
       'https://api.x.ai/v1/chat/completions',
       {
         messages: [
-          { role: 'system', content: 'Sen bir kripto para analiz botusun. Teknik indikatörlere ve Bitcoin durumuna dayalı doğal, Türkçe yorumlar yap.' },
+          { role: 'system', content: 'Sen bir kripto para analiz botusun. Teknik indikatörlere ve Bitcoin durumuna dayalı kısa, doğal, Türkçe yorumlar yap (maksimum 100 kelime).' },
           { role: 'user', content: prompt },
         ],
-        model: 'grok-4-0709', // Model adı güncellendi
+        model: 'grok-4-0709',
         stream: false,
         temperature: 0.7,
+        max_tokens: 200,
       },
       {
         headers: {
@@ -78,11 +71,11 @@ async function callGrok(prompt) {
         },
       }
     );
-    console.log('Grok API response:', response.data); // Hata ayıklama için log
+    console.log('Grok API response:', response.data);
     return response.data.choices[0].message.content.trim();
   } catch (error) {
     console.error('Grok API error:', error.response?.data || error.message);
-    return null; // Hata durumunda null dön, fallback kullanacağız
+    return null;
   }
 }
 
@@ -107,7 +100,7 @@ async function analyzeCoin(coin, btcData = null, news = []) {
       StochRSI: ${indicators.StochRSI.toFixed(2)}, Hacim değişimi: ${indicators.volumeChange.toFixed(2)}%, 
       BTC durumu: ${btcStatus}, Haber durumu: ${negativeNews ? 'Olumsuz' : 'Nötr'}. 
       Giriş: ${dip.toFixed(2)}, Çıkış: ${tp.toFixed(2)}. 
-      Türkçe, doğal ve ayrıntılı bir analiz yorumu yap.`;
+      Türkçe, kısa, doğal ve ayrıntılı bir analiz yorumu yap (maksimum 100 kelime).`;
     let comment = await callGrok(prompt);
     if (!comment) {
       comment = generateFallbackComment(indicators, btcStatus, dip, tp, timeframe, coin);
