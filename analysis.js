@@ -1,7 +1,6 @@
 const ccxt = require('ccxt');
 const { RSI, MACD, EMA, PSAR, StochasticRSI } = require('technicalindicators');
 const axios = require('axios');
-const { startWebSocket } = require('./websocket');
 
 const COINS = ['AAVE-USDT', 'COMP-USDT', 'LTC-USDT', 'XLM-USDT', 'ADA-USDT', 'MKR-USDT', 'BTC-USDT'];
 const TIMEFRAMES = ['1min', '5min', '30min', '1hour', '2hour', '4hour', '1day', '1week', '1month'];
@@ -32,25 +31,6 @@ async function fetchHttpKlines(coin, timeframe, startAt = 0, endAt = 0) {
   }
 }
 
-async function fetchWebSocketKlines(coin, timeframe) {
-  return new Promise((resolve) => {
-    const { fetchKlines } = startWebSocket(coin, timeframe, ({ klines }) => {
-      if (klines && klines.length >= 200) {
-        resolve(klines.slice(-200));
-      }
-    });
-    setTimeout(() => {
-      const data = fetchKlines();
-      if (data.length < 200) {
-        console.warn(`Insufficient WebSocket klines for ${coin}_${timeframe}, got ${data.length}, using HTTP`);
-        resolve(fetchHttpKlines(coin, timeframe));
-      } else {
-        resolve(data);
-      }
-    }, 30000);
-  });
-}
-
 function calculateIndicators(data) {
   const closes = data.map(d => d.close);
   const highs = data.map(d => d.high);
@@ -70,11 +50,11 @@ function calculateIndicators(data) {
 
 function generateFallbackComment(indicators, btcStatus, dip, tp, timeframe, coin) {
   let comment = `BTC durumu: ${btcStatus}. `;
-  if (indicators.RSI < 30) comment += `${coin} ${timeframe} zaman diliminde aşırı satım bölgesinde, alım fırsatı olabilir. `;
-  else if (indicators.RSI > 70) comment += `${coin} ${timeframe} zaman diliminde aşırı alım bölgesinde, satış düşünülebilir. `;
-  else comment += `${coin} ${timeframe} zaman diliminde nötr bölgede. `;
+  if (indicators.RSI < 30) comment += `${coin} ${timeframe}'de aşırı satım bölgesinde, alım fırsatı olabilir. `;
+  else if (indicators.RSI > 70) comment += `${coin} ${timeframe}'de aşırı alım bölgesinde, satış düşünülebilir. `;
+  else comment += `${coin} ${timeframe}'de nötr bölgede. `;
   comment += `RSI: ${indicators.RSI.toFixed(2)}, MACD: ${indicators.MACD.toFixed(2)}, Hacim değişimi: ${indicators.volumeChange.toFixed(2)}%. `;
-  comment += `Tahmini giriş: ${dip.toFixed(2)}, Tahmini çıkış: ${tp.toFixed(2)}.`;
+  comment += `Giriş: ${dip.toFixed(2)}, Çıkış: ${tp.toFixed(2)}.`;
   return comment;
 }
 
@@ -84,13 +64,13 @@ async function callGrok(prompt) {
       'https://api.x.ai/v1/chat/completions',
       {
         messages: [
-          { role: 'system', content: 'Sen bir kripto para analiz botusun. Teknik indikatörlere ve Bitcoin durumuna dayalı kısa, doğal, Türkçe yorumlar yap (maksimum 100 kelime).' },
+          { role: 'system', content: 'Sen bir kripto para analiz botusun. Teknik indikatörlere dayalı kısa, samimi, anlaşılır ve doğal Türkçe yorumlar yap (maksimum 600 kelime).' },
           { role: 'user', content: prompt },
         ],
         model: 'grok-4-0709',
         stream: false,
         temperature: 0.7,
-        max_tokens: 200,
+        max_tokens: 1200, // Artırıldı
       },
       {
         headers: {
@@ -110,7 +90,7 @@ async function callGrok(prompt) {
 async function analyzeCoin(coin, btcData = null, news = [], useWebSocket = false) {
   let result = { coin, tarih: new Date().toLocaleString('tr-TR'), analyses: {} };
   for (const timeframe of TIMEFRAMES) {
-    const data = useWebSocket ? await fetchWebSocketKlines(coin, timeframe) : await fetchHttpKlines(coin, timeframe);
+    const data = await fetchHttpKlines(coin, timeframe); // Her durumda HTTP Klines
     if (!data.length) continue;
 
     const indicators = calculateIndicators(data);
@@ -122,13 +102,13 @@ async function analyzeCoin(coin, btcData = null, news = [], useWebSocket = false
 
     const negativeNews = news.some(n => n.toLowerCase().includes('düşüş') || n.toLowerCase().includes('hack'));
     const prompt = `
-      Coin: ${coin}, Zaman dilimi: ${timeframe}, RSI: ${indicators.RSI.toFixed(2)}, 
-      MACD: ${indicators.MACD.toFixed(2)}, EMA50: ${indicators.EMA50.toFixed(2)}, 
-      EMA200: ${indicators.EMA200.toFixed(2)}, PSAR: ${indicators.PSAR.toFixed(2)}, 
-      StochRSI: ${indicators.StochRSI.toFixed(2)}, Hacim değişimi: ${indicators.volumeChange.toFixed(2)}%, 
-      BTC durumu: ${btcStatus}, Haber durumu: ${negativeNews ? 'Olumsuz' : 'Nötr'}. 
-      Giriş: ${dip.toFixed(2)}, Çıkış: ${tp.toFixed(2)}. 
-      Türkçe, kısa, doğal ve ayrıntılı bir analiz yorumu yap (maksimum 100 kelime).`;
+      ${coin} için ${timeframe} zaman diliminde analiz yap. 
+      RSI: ${indicators.RSI.toFixed(2)}, MACD: ${indicators.MACD.toFixed(2)}, 
+      EMA50: ${indicators.EMA50.toFixed(2)}, EMA200: ${indicators.EMA200.toFixed(2)}, 
+      PSAR: ${indicators.PSAR.toFixed(2)}, StochRSI: ${indicators.StochRSI.toFixed(2)}, 
+      Hacim değişimi: ${indicators.volumeChange.toFixed(2)}%, BTC durumu: ${btcStatus}, 
+      Haber: ${negativeNews ? 'Olumsuz' : 'Nötr'}, Giriş: ${dip.toFixed(2)}, Çıkış: ${tp.toFixed(2)}. 
+      Kısa, samimi ve doğal bir Türkçe yorum yap (maksimum 600 kelime).`;
     let comment = await callGrok(prompt);
     if (!comment) {
       comment = generateFallbackComment(indicators, btcStatus, dip, tp, timeframe, coin);
@@ -143,7 +123,7 @@ async function fullAnalysis(news) {
   const btcData = await fetchHttpKlines('BTC-USDT', '1hour');
   const messages = [];
   for (const coin of COINS) {
-    const analysis = await analyzeCoin(coin, btcData, news, false); // HTTP Klines
+    const analysis = await analyzeCoin(coin, btcData, news, false);
     for (const [timeframe, data] of Object.entries(analysis.analyses)) {
       let message = `${coin} Analizi (${timeframe}, ${new Date().toLocaleString('tr-TR')}):\n`;
       message += `  Giriş: ${data.giriş.toFixed(2)}, Çıkış: ${data.çıkış.toFixed(2)}\n  Yorum: ${data.yorum}\n`;
@@ -151,10 +131,18 @@ async function fullAnalysis(news) {
       if (negative && coin.includes('BTC') && timeframe === '1hour') {
         message += `  Alarm: Bitcoin düşüyor, dikkat! Tahmini dip: ${data.giriş.toFixed(2)}.\n`;
       }
-      messages.push(message);
+      // Telegram 4096 karakter sınırı için mesajları böl
+      if (message.length > 4000) {
+        const chunks = message.match(/.{1,4000}/g);
+        for (const chunk of chunks) {
+          messages.push(chunk);
+        }
+      } else {
+        messages.push(message);
+      }
     }
   }
   return messages;
 }
 
-module.exports = { fetchHttpKlines, fetchWebSocketKlines, calculateIndicators, analyzeCoin, fullAnalysis };
+module.exports = { fetchHttpKlines, calculateIndicators, analyzeCoin, fullAnalysis };
