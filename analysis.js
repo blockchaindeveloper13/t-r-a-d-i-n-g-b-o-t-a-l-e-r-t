@@ -51,18 +51,31 @@ function calculateIndicators(data) {
 async function callGrok(prompt) {
   try {
     const response = await axios.post(
-      'https://api.x.ai/v1/grok', // xAI API endpoint (varsayılan, gerçek endpoint gerekirse güncelleriz)
-      { prompt, max_tokens: 200, model: 'grok-3' },
-      { headers: { Authorization: `Bearer ${process.env.GROK_API_KEY}`, 'Content-Type': 'application/json' } }
+      'https://api.x.ai/v1/chat/completions',
+      {
+        messages: [
+          { role: 'system', content: 'Sen bir kripto para analiz botusun. Teknik indikatörlere ve Bitcoin durumuna dayalı doğal, Türkçe yorumlar yap.' },
+          { role: 'user', content: prompt },
+        ],
+        model: 'grok-4-latest',
+        stream: false,
+        temperature: 0.7,
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${process.env.GROK_API_KEY}`,
+        },
+      }
     );
-    return response.data.choices[0].text.trim();
+    return response.data.choices[0].message.content.trim();
   } catch (error) {
     console.error('Grok API error:', error.message);
-    return 'Yorum oluşturulamadı.';
+    return `Yorum oluşturulamadı: ${error.message}`;
   }
 }
 
-async function analyzeCoin(coin, btcData = null) {
+async function analyzeCoin(coin, btcData = null, news = []) {
   let result = { coin, tarih: new Date().toLocaleString('tr-TR'), analyses: {} };
   for (const timeframe of TIMEFRAMES) {
     const data = await fetchKlines(coin, timeframe);
@@ -75,7 +88,15 @@ async function analyzeCoin(coin, btcData = null) {
     const btcIndicators = btcData ? calculateIndicators(btcData) : {};
     const btcStatus = btcIndicators.EMA50 > btcIndicators.EMA200 ? 'Yükselişte' : 'Düşüşte';
 
-    const prompt = `Coin: ${coin}, Zaman dilimi: ${timeframe}, RSI: ${indicators.RSI.toFixed(2)}, MACD: ${indicators.MACD.toFixed(2)}, EMA50: ${indicators.EMA50.toFixed(2)}, EMA200: ${indicators.EMA200.toFixed(2)}, PSAR: ${indicators.PSAR.toFixed(2)}, StochRSI: ${indicators.StochRSI.toFixed(2)}, Hacim değişimi: ${indicators.volumeChange.toFixed(2)}%, BTC durumu: ${btcStatus}. Giriş: ${dip.toFixed(2)}, Çıkış: ${tp.toFixed(2)}. Türkçe doğal bir analiz yorumu yap.`;
+    const negativeNews = news.some(n => n.toLowerCase().includes('düşüş') || n.toLowerCase().includes('hack'));
+    const prompt = `
+      Coin: ${coin}, Zaman dilimi: ${timeframe}, RSI: ${indicators.RSI.toFixed(2)}, 
+      MACD: ${indicators.MACD.toFixed(2)}, EMA50: ${indicators.EMA50.toFixed(2)}, 
+      EMA200: ${indicators.EMA200.toFixed(2)}, PSAR: ${indicators.PSAR.toFixed(2)}, 
+      StochRSI: ${indicators.StochRSI.toFixed(2)}, Hacim değişimi: ${indicators.volumeChange.toFixed(2)}%, 
+      BTC durumu: ${btcStatus}, Haber durumu: ${negativeNews ? 'Olumsuz' : 'Nötr'}. 
+      Giriş: ${dip.toFixed(2)}, Çıkış: ${tp.toFixed(2)}. 
+      Türkçe, doğal ve ayrıntılı bir analiz yorumu yap.`;
     const comment = await callGrok(prompt);
 
     result.analyses[timeframe] = { giriş: dip, çıkış: tp, yorum: comment, indicators };
@@ -85,19 +106,24 @@ async function analyzeCoin(coin, btcData = null) {
 
 async function fullAnalysis(news) {
   const btcData = await fetchKlines('BTC-USDT', '1hour');
-  let message = `Analiz Zamanı: ${new Date().toLocaleString('tr-TR')}\n`;
+  const messages = [];
   for (const coin of COINS) {
-    const analysis = await analyzeCoin(coin, btcData);
-    message += `${coin}:\n`;
+    const analysis = await analyzeCoin(coin, btcData, news);
+    let message = `${coin} Analizi (${new Date().toLocaleString('tr-TR')}):\n`;
     for (const [timeframe, data] of Object.entries(analysis.analyses)) {
       message += `  ${timeframe}: Giriş: ${data.giriş.toFixed(2)}, Çıkış: ${data.çıkış.toFixed(2)}\n  Yorum: ${data.yorum}\n\n`;
+      if (message.length > 3500) {
+        messages.push(message);
+        message = '';
+      }
     }
     const negative = news.some(n => n.toLowerCase().includes('düşüş') || n.toLowerCase().includes('hack'));
     if (negative && coin.includes('BTC')) {
       message += `  Alarm: Bitcoin düşüyor, dikkat! Tahmini dip: ${analysis.analyses['1hour']?.giriş.toFixed(2)}.\n`;
     }
+    if (message) messages.push(message);
   }
-  return message;
+  return messages;
 }
 
 module.exports = { fetchKlines, calculateIndicators, analyzeCoin, fullAnalysis };
