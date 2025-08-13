@@ -1,25 +1,53 @@
+const ccxt = require('ccxt');
 const { RSI, MACD, EMA, PSAR, StochasticRSI } = require('technicalindicators');
 const axios = require('axios');
 const { startWebSocket } = require('./websocket');
 
 const COINS = ['AAVE-USDT', 'COMP-USDT', 'LTC-USDT', 'XLM-USDT', 'ADA-USDT', 'MKR-USDT', 'BTC-USDT'];
-const TIMEFRAMES = ['1min', '5min', '30min', '1hour', '2hour', '4hour', '1day', '1week'];
+const TIMEFRAMES = ['1min', '5min', '30min', '1hour', '2hour', '4hour', '1day', '1week', '1month'];
 
-async function fetchKlines(coin, timeframe) {
+const kucoin = new ccxt.kucoin({
+  apiKey: process.env.KUCOIN_KEY,
+  secret: process.env.KUCOIN_SECRET,
+  enableRateLimit: true,
+});
+
+async function fetchHttpKlines(coin, timeframe, startAt = 0, endAt = 0) {
+  try {
+    const params = { symbol: coin, type: timeframe };
+    if (startAt) params.startAt = startAt;
+    if (endAt) params.endAt = endAt;
+    const response = await axios.get('https://api.kucoin.com/api/v1/market/candles', { params });
+    return response.data.data.map(([time, open, close, high, low, volume, amount]) => ({
+      timestamp: new Date(parseInt(time) * 1000).toISOString(),
+      open: parseFloat(open),
+      high: parseFloat(high),
+      low: parseFloat(low),
+      close: parseFloat(close),
+      volume: parseFloat(volume),
+    }));
+  } catch (error) {
+    console.error(`HTTP Klines error for ${coin} (${timeframe}):`, error.message);
+    return [];
+  }
+}
+
+async function fetchWebSocketKlines(coin, timeframe) {
   return new Promise((resolve) => {
-    const klines = [];
-    const ws = startWebSocket(coin, timeframe, (data) => {
-      klines.push(data);
-      if (klines.length >= 200) { // EMA200 için yeterli veri
+    const { fetchKlines } = startWebSocket(coin, timeframe, ({ klines }) => {
+      if (klines && klines.length >= 200) {
         resolve(klines.slice(-200));
       }
     });
     setTimeout(() => {
-      if (klines.length < 200) {
-        console.warn(`Insufficient klines for ${coin}_${timeframe}, got ${klines.length}`);
-        resolve(klines);
+      const data = fetchKlines();
+      if (data.length < 200) {
+        console.warn(`Insufficient WebSocket klines for ${coin}_${timeframe}, got ${data.length}, using HTTP`);
+        resolve(fetchHttpKlines(coin, timeframe));
+      } else {
+        resolve(data);
       }
-    }, 30000); // 30 saniye bekle
+    }, 30000);
   });
 }
 
@@ -79,10 +107,10 @@ async function callGrok(prompt) {
   }
 }
 
-async function analyzeCoin(coin, btcData = null, news = []) {
+async function analyzeCoin(coin, btcData = null, news = [], useWebSocket = false) {
   let result = { coin, tarih: new Date().toLocaleString('tr-TR'), analyses: {} };
   for (const timeframe of TIMEFRAMES) {
-    const data = await fetchKlines(coin, timeframe);
+    const data = useWebSocket ? await fetchWebSocketKlines(coin, timeframe) : await fetchHttpKlines(coin, timeframe);
     if (!data.length) continue;
 
     const indicators = calculateIndicators(data);
@@ -112,10 +140,10 @@ async function analyzeCoin(coin, btcData = null, news = []) {
 }
 
 async function fullAnalysis(news) {
-  const btcData = await fetchKlines('BTC-USDT', '1hour');
+  const btcData = await fetchHttpKlines('BTC-USDT', '1hour');
   const messages = [];
   for (const coin of COINS) {
-    const analysis = await analyzeCoin(coin, btcData, news);
+    const analysis = await analyzeCoin(coin, btcData, news, false); // HTTP Klines
     for (const [timeframe, data] of Object.entries(analysis.analyses)) {
       let message = `${coin} Analizi (${timeframe}, ${new Date().toLocaleString('tr-TR')}):\n`;
       message += `  Giriş: ${data.giriş.toFixed(2)}, Çıkış: ${data.çıkış.toFixed(2)}\n  Yorum: ${data.yorum}\n`;
@@ -129,4 +157,4 @@ async function fullAnalysis(news) {
   return messages;
 }
 
-module.exports = { fetchKlines, calculateIndicators, analyzeCoin, fullAnalysis };
+module.exports = { fetchHttpKlines, fetchWebSocketKlines, calculateIndicators, analyzeCoin, fullAnalysis };
