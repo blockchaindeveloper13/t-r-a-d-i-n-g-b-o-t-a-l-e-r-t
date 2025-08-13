@@ -1,4 +1,4 @@
-// Merged index.js - All files combined into one (package.json at the end as comment)
+// Merged index.js - All files combined into one
 
 const { Telegraf } = require('telegraf');
 const schedule = require('node-schedule');
@@ -11,17 +11,17 @@ const WebSocket = require('ws');
 
 // Cache for API responses
 const cache = new Map();
-const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
+const CACHE_DURATION = 3 * 60 * 1000; // 3 minutes
 
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN || '7551795139:AAHJa1du2jRmmA1gmTPIHwJbUsRT7wOksaI');
 const parser = new Parser();
 const COINS = ['AAVE-USDT', 'COMP-USDT', 'LTC-USDT', 'XLM-USDT', 'ADA-USDT', 'MKR-USDT', 'BTC-USDT'];
-const TIMEFRAMES = ['1min', '5min', '30min', '1hour', '2hour', '4hour', '1day', '1week', '1month'];
+const SHORT_TIMEFRAMES = ['1min', '5min', '30min', '1hour']; // Only short-term timeframes
 const GROUP_ID = '-1002869335730'; // @tradingroup95 grup ID'si
 let isBotStarted = false;
 
 // Rate limit control for Grok API
-const RATE_LIMIT_MS = 500; // 500ms between requests
+const RATE_LIMIT_MS = 300; // 300ms between requests
 let lastGrokRequest = 0;
 
 async function rateLimitedCallGrok(prompt) {
@@ -45,13 +45,13 @@ async function rateLimitedCallGrok(prompt) {
       'https://api.x.ai/v1/chat/completions',
       {
         messages: [
-          { role: 'system', content: 'Sen bir kripto para analiz botusun. Tüm zaman dilimlerini (1min, 5min, 30min, 1hour, 2hour, 4hour, 1day, 1week, 1month) inceleyip teknik indikatörlere dayalı tek bir kısa, samimi, anlaşılır ve doğal Türkçe yorum yap (maksimum 600 kelime). Her zaman dilimi için ayrı ayrı yorum yapma, hepsini birleştir.' },
+          { role: 'system', content: 'Sen bir kripto para analiz botusun. Sadece kısa vadeli zaman dilimlerini (1min, 5min, 30min, 1hour) inceleyip teknik indikatörlere dayalı tek bir kısa, samimi, anlaşılır ve doğal Türkçe yorum yap (maksimum 300 kelime). Giriş fiyatı için 📉, çıkış fiyatı için 📈 kullan.' },
           { role: 'user', content: prompt },
         ],
         model: 'grok-4-0709',
         stream: false,
         temperature: 0.7,
-        max_tokens: 1200,
+        max_tokens: 600,
       },
       {
         headers: {
@@ -240,14 +240,17 @@ async function fetchHttpKlines(coin, timeframe, startAt = 0, endAt = 0) {
     if (startAt) params.startAt = startAt;
     if (endAt) params.endAt = endAt;
     const response = await axios.get('https://api.kucoin.com/api/v1/market/candles', { params });
-    const data = response.data.data.map(([time, open, close, high, low, volume, amount]) => ({
-      timestamp: new Date(parseInt(time) * 1000).toISOString(),
-      open: parseFloat(open),
-      high: parseFloat(high),
-      low: parseFloat(low),
-      close: parseFloat(close),
-      volume: parseFloat(volume),
-    }));
+    const data = response.data.data
+      .map(([time, open, close, high, low, volume, amount]) => ({
+        timestamp: new Date(parseInt(time) * 1000).toISOString(),
+        open: parseFloat(open),
+        high: parseFloat(high),
+        low: parseFloat(low),
+        close: parseFloat(close),
+        volume: parseFloat(volume),
+      }))
+      .filter(d => d.low > 0 && d.high > 0 && d.low < d.high); // Mantıksız fiyatları filtrele
+    if (data.length === 0) throw new Error('No valid data after filtering');
     cache.set(cacheKey, { data, timestamp: Date.now() });
     return data;
   } catch (error) {
@@ -257,29 +260,37 @@ async function fetchHttpKlines(coin, timeframe, startAt = 0, endAt = 0) {
 }
 
 function calculateIndicators(data) {
+  if (!data || data.length < 2) return null;
   const closes = data.map(d => d.close);
   const highs = data.map(d => d.high);
   const lows = data.map(d => d.low);
   const volumes = data.map(d => d.volume);
 
-  return {
-    RSI: RSI.calculate({ period: 14, values: closes }).slice(-1)[0] || 0,
-    MACD: MACD.calculate({ fastPeriod: 12, slowPeriod: 26, signalPeriod: 9, values: closes }).slice(-1)[0]?.MACD || 0,
-    EMA50: EMA.calculate({ period: 50, values: closes }).slice(-1)[0] || 0,
-    EMA200: EMA.calculate({ period: 200, values: closes }).slice(-1)[0] || 0,
-    PSAR: PSAR.calculate({ high: highs, low: lows, step: 0.02, max: 0.2 }).slice(-1)[0] || 0,
-    StochRSI: StochasticRSI.calculate({ period: 14, rsiPeriod: 14, stochasticPeriod: 14, kPeriod: 3, dPeriod: 3, values: closes }).slice(-1)[0]?.k || 0,
-    volumeChange: ((volumes[volumes.length - 1] - volumes[volumes.length - 2]) / volumes[volumes.length - 2] * 100) || 0,
-  };
+  try {
+    return {
+      RSI: RSI.calculate({ period: 14, values: closes }).slice(-1)[0] || 0,
+      MACD: MACD.calculate({ fastPeriod: 12, slowPeriod: 26, signalPeriod: 9, values: closes }).slice(-1)[0]?.MACD || 0,
+      EMA50: EMA.calculate({ period: 50, values: closes }).slice(-1)[0] || 0,
+      EMA200: EMA.calculate({ period: 200, values: closes }).slice(-1)[0] || 0,
+      PSAR: PSAR.calculate({ high: highs, low: lows, step: 0.02, max: 0.2 }).slice(-1)[0] || 0,
+      StochRSI: StochasticRSI.calculate({ period: 14, rsiPeriod: 14, stochasticPeriod: 14, kPeriod: 3, dPeriod: 3, values: closes }).slice(-1)[0]?.k || 0,
+      volumeChange: ((volumes[volumes.length - 1] - volumes[volumes.length - 2]) / volumes[volumes.length - 2] * 100) || 0,
+    };
+  } catch (error) {
+    console.error('Calculate indicators error:', error.message);
+    return null;
+  }
 }
 
 function generateFallbackComment(indicatorsByTimeframe, btcStatus, dip, tp, coin) {
   let comment = `BTC durumu: ${btcStatus}. `;
-  const rsiAvg = Object.values(indicatorsByTimeframe).reduce((sum, ind) => sum + ind.RSI, 0) / Object.keys(indicatorsByTimeframe).length;
-  if (rsiAvg < 30) comment += `${coin} genel olarak aşırı satım bölgesinde, alım fırsatı olabilir. `;
-  else if (rsiAvg > 70) comment += `${coin} genel olarak aşırı alım bölgesinde, satış düşünülebilir. `;
-  else comment += `${coin} genel olarak nötr bölgede. `;
-  comment += `Ortalama RSI: ${rsiAvg.toFixed(2)}, Giriş: ${dip.toFixed(2)}, Çıkış: ${tp.toFixed(2)}.`;
+  const validIndicators = Object.values(indicatorsByTimeframe).filter(ind => ind !== null);
+  if (!validIndicators.length) return `Veri eksik, ${coin} analizi yapılamadı. 📉 ${dip.toFixed(2)} 📈 ${tp.toFixed(2)}`;
+  const rsiAvg = validIndicators.reduce((sum, ind) => sum + ind.RSI, 0) / validIndicators.length;
+  if (rsiAvg < 30) comment += `${coin} kısa vadede aşırı satım bölgesinde, alım fırsatı olabilir. `;
+  else if (rsiAvg > 70) comment += `${coin} kısa vadede aşırı alım bölgesinde, satış düşünülebilir. `;
+  else comment += `${coin} kısa vadede nötr bölgede. `;
+  comment += `Ortalama RSI: ${rsiAvg.toFixed(2)}, Giriş: 📉 ${dip.toFixed(2)}, Çıkış: 📈 ${tp.toFixed(2)}.`;
   return comment;
 }
 
@@ -288,30 +299,38 @@ async function analyzeCoin(coin, btcData = null, news = [], useWebSocket = false
   let indicatorsByTimeframe = {};
   let dip = Infinity, tp = 0;
 
-  // Tüm zaman dilimlerini paralel olarak çek
-  const klinesPromises = TIMEFRAMES.map(timeframe => fetchHttpKlines(coin, timeframe));
+  // Son 24 saat için kısa vadeli zaman dilimlerini paralel olarak çek
+  const endAt = Math.floor(Date.now() / 1000);
+  const startAt = endAt - 24 * 60 * 60; // Son 24 saat
+  const klinesPromises = SHORT_TIMEFRAMES.map(timeframe => fetchHttpKlines(coin, timeframe, startAt, endAt));
   const klinesResults = await Promise.all(klinesPromises);
 
-  for (let i = 0; i < TIMEFRAMES.length; i++) {
-    const timeframe = TIMEFRAMES[i];
+  for (let i = 0; i < SHORT_TIMEFRAMES.length; i++) {
+    const timeframe = SHORT_TIMEFRAMES[i];
     const data = klinesResults[i];
     if (!data.length) continue;
 
     const indicators = calculateIndicators(data);
-    indicatorsByTimeframe[timeframe] = indicators;
+    if (indicators) indicatorsByTimeframe[timeframe] = indicators;
     dip = Math.min(dip, ...data.map(d => d.low));
     tp = Math.max(tp, ...data.map(d => d.high)) * 1.05;
   }
 
-  const btcIndicators = btcData ? calculateIndicators(btcData) : {};
-  const btcStatus = btcIndicators.EMA50 > btcIndicators.EMA200 ? 'Yükselişte' : 'Düşüşte';
+  if (dip === Infinity || tp === 0) {
+    console.error(`Invalid dip/tp for ${coin}: dip=${dip}, tp=${tp}`);
+    dip = 0;
+    tp = 0;
+  }
+
+  const btcIndicators = btcData ? calculateIndicators(btcData) : null;
+  const btcStatus = btcIndicators && btcIndicators.EMA50 > btcIndicators.EMA200 ? 'Yükselişte' : 'Düşüşte';
   const negativeNews = news.some(n => n.toLowerCase().includes('düşüş') || n.toLowerCase().includes('hack'));
 
   const prompt = `
-    ${coin} için tüm zaman dilimlerini (1min, 5min, 30min, 1hour, 2hour, 4hour, 1day, 1week, 1month) birleştirip analiz yap.
+    ${coin} için kısa vadeli zaman dilimlerini (1min, 5min, 30min, 1hour) birleştirip analiz yap.
     İndikatörler: ${JSON.stringify(indicatorsByTimeframe, null, 2)}.
-    BTC durumu: ${btcStatus}, Haber: ${negativeNews ? 'Olumsuz' : 'Nötr'}, Giriş: ${dip.toFixed(2)}, Çıkış: ${tp.toFixed(2)}.
-    Kısa, samimi ve doğal bir Türkçe yorum yap (maksimum 600 kelime).`;
+    BTC durumu: ${btcStatus}, Haber: ${negativeNews ? 'Olumsuz' : 'Nötr'}, Giriş: 📉 ${dip.toFixed(2)}, Çıkış: 📈 ${tp.toFixed(2)}.
+    Kısa, samimi ve doğal bir Türkçe yorum yap (maksimum 300 kelime).`;
   let comment = await rateLimitedCallGrok(prompt);
   if (!comment) {
     comment = generateFallbackComment(indicatorsByTimeframe, btcStatus, dip, tp, coin);
@@ -322,15 +341,15 @@ async function analyzeCoin(coin, btcData = null, news = [], useWebSocket = false
 }
 
 async function fullAnalysis(news) {
-  const btcData = await fetchHttpKlines('BTC-USDT', '1hour');
+  const btcData = await fetchHttpKlines('BTC-USDT', '1hour', Math.floor(Date.now() / 1000) - 24 * 60 * 60, Math.floor(Date.now() / 1000));
   const messages = [];
   for (const coin of COINS) {
     const analysis = await analyzeCoin(coin, btcData, news, false);
     let message = `${coin} Analizi (${new Date().toLocaleString('tr-TR')}):\n`;
-    message += `  Giriş: ${analysis.analyses.giriş.toFixed(2)}, Çıkış: ${analysis.analyses.çıkış.toFixed(2)}\n  Yorum: ${analysis.analyses.yorum}\n`;
+    message += `  Giriş: 📉 ${analysis.analyses.giriş.toFixed(2)}, Çıkış: 📈 ${analysis.analyses.çıkış.toFixed(2)}\n  Yorum: ${analysis.analyses.yorum}\n`;
     const negative = news.some(n => n.toLowerCase().includes('düşüş') || n.toLowerCase().includes('hack'));
     if (negative && coin.includes('BTC')) {
-      message += `  Alarm: Bitcoin düşüyor, dikkat! Tahmini dip: ${analysis.analyses.giriş.toFixed(2)}.\n`;
+      message += `  Alarm: Bitcoin düşüyor, dikkat! Tahmini dip: 📉 ${analysis.analyses.giriş.toFixed(2)}.\n`;
     }
     messages.push(message);
   }
@@ -340,7 +359,7 @@ async function fullAnalysis(news) {
 // Telegram Commands
 bot.command('start', async (ctx) => {
   console.log('Start komutu alındı, chat ID:', ctx.chat.id);
-  await ctx.reply('Merhaba! Kripto analiz botu hazır. /analiz ile başla veya coin sor (ör. "ADA ne durumda?").');
+  await ctx.reply('Merhaba! Kripto analiz botu hazır. /analiz ile başla veya coin sor (ör. "ADA ne durumda?"). 😎');
 });
 
 bot.command('analiz', async (ctx) => {
@@ -359,7 +378,7 @@ bot.command('analiz', async (ctx) => {
     }
   } catch (error) {
     console.error('Analiz command error:', error);
-    await ctx.reply('Analiz sırasında bir hata oluştu, lütfen tekrar deneyin.');
+    await ctx.reply('Analiz sırasında bir hata oluştu, lütfen tekrar deneyin. 😓');
   }
 });
 
@@ -374,21 +393,21 @@ bot.command('alarm_kur', async (ctx) => {
         try {
           const news = await fetchNews();
           const analysis = await analyzeCoin(coinPair, null, news, false);
-          let message = `Alarm: ${coin} ${currentPrice.toFixed(2)}'e ${currentPrice <= parseFloat(price) ? 'düştü' : 'çıktı'}!\n`;
+          let message = `Alarm: ${coin} ${currentPrice.toFixed(2)}'e ${currentPrice <= parseFloat(price) ? 'düştü' : 'çıktı'}! 🚨\n`;
           message += `${coin} Analizi (${new Date().toLocaleString('tr-TR')}):\n`;
-          message += `  Giriş: ${analysis.analyses.giriş.toFixed(2)}, Çıkış: ${analysis.analyses.çıkış.toFixed(2)}\n  Yorum: ${analysis.analyses.yorum}\n`;
+          message += `  Giriş: 📉 ${analysis.analyses.giriş.toFixed(2)}, Çıkış: 📈 ${analysis.analyses.çıkış.toFixed(2)}\n  Yorum: ${analysis.analyses.yorum}\n`;
           await ctx.reply(message);
           if (ctx.chat.id == GROUP_ID) {
             await bot.telegram.sendMessage(GROUP_ID, message);
           }
         } catch (error) {
           console.error('Alarm error:', error);
-          await ctx.reply(`Alarm: ${coin} ${currentPrice.toFixed(2)}'e ulaştı, ancak analiz alınamadı.`);
+          await ctx.reply(`Alarm: ${coin} ${currentPrice.toFixed(2)}'e ulaştı, ancak analiz alınamadı. 😓`);
         }
       }
     });
     startPriceWebSocket(coinPair, parseFloat(price), () => {});
-    await ctx.reply(`${coin} için ${price} alarmı kuruldu.`);
+    await ctx.reply(`${coin} için ${price} alarmı kuruldu. 🔔`);
   } else {
     await ctx.reply('Kullanım: /alarm_kur coin fiyat');
   }
@@ -404,7 +423,7 @@ bot.on('text', async (ctx) => {
       console.log(`Coin analizi: ${coin}`);
       const news = await fetchNews();
       const analysis = await analyzeCoin(coin, null, news, false);
-      let message = `${coin} Analizi (${new Date().toLocaleString('tr-TR')}):\nGiriş: ${analysis.analyses.giriş.toFixed(2)}, Çıkış: ${analysis.analyses.çıkış.toFixed(2)}\nYorum: ${analysis.analyses.yorum}`;
+      let message = `${coin} Analizi (${new Date().toLocaleString('tr-TR')}):\nGiriş: 📉 ${analysis.analyses.giriş.toFixed(2)}, Çıkış: 📈 ${analysis.analyses.çıkış.toFixed(2)}\nYorum: ${analysis.analyses.yorum}`;
       await ctx.reply(message);
       if (ctx.chat.id == GROUP_ID) {
         await bot.telegram.sendMessage(GROUP_ID, message);
@@ -412,13 +431,13 @@ bot.on('text', async (ctx) => {
       await saveAnalysis(db, { tarih: new Date().toLocaleString('tr-TR'), analiz: JSON.stringify(analysis.analyses) }).catch(err => console.error('Save analysis error:', err));
     } else {
       console.log('Genel sohbet, metin:', text);
-      const prompt = `Kullanıcı mesajı: "${text}". Kripto analiz botusun, kısa ve doğal Türkçe yanıt ver. Coin analizi istersen analiz yap, yoksa sohbet et.`;
+      const prompt = `Kullanıcı mesajı: "${text}". Kripto analiz botusun, kısa ve doğal Türkçe yanıt ver. Coin analizi istersen analiz yap, yoksa sohbet et. 😊`;
       const comment = await rateLimitedCallGrok(prompt);
-      await ctx.reply(comment || 'Üzgünüm, bu konuda yorum yapamadım. Bir coin belirtir misin?');
+      await ctx.reply(comment || 'Üzgünüm, bu konuda yorum yapamadım. Bir coin belirtir misin? 🤔');
     }
   } catch (error) {
     console.error('Text handler error:', error);
-    await ctx.reply('Bir hata oluştu, lütfen tekrar deneyin.');
+    await ctx.reply('Bir hata oluştu, lütfen tekrar deneyin. 😓');
   }
 });
 
