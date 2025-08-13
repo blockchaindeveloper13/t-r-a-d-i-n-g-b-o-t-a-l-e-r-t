@@ -16,26 +16,14 @@ const GROUP_ID = '-1002869335730'; // @tradingroup95 grup ID'si
 const db = new sqlite3.Database('./analiz.db');
 initDB(db);
 
-// Webhook kontrolü ve polling
-async function checkWebhook() {
-  try {
-    const webhookInfo = await bot.telegram.getWebhookInfo();
-    console.log('Webhook info:', JSON.stringify(webhookInfo, null, 2));
-    if (webhookInfo.url) {
-      console.log('Webhook bulundu, siliniyor...');
-      await bot.telegram.deleteWebhook();
-      console.log('Webhook silindi.');
-    }
-  } catch (error) {
-    console.error('Webhook kontrol hatası:', error.message, error.stack);
-  }
-  // Polling'i ayrı başlat
+// Botu polling modunda başlat
+async function startBot() {
   try {
     await bot.launch({ webhook: null });
     console.log('Bot polling modunda başlatıldı.');
     await bot.telegram.sendMessage(GROUP_ID, 'Merhaba @tradingroup95! Kripto analiz botu aktif. /analiz ile başlayın veya coin sor (ör. "ADA ne durumda?").');
   } catch (error) {
-    console.error('Polling başlatma hatası:', error.message, error.stack);
+    console.error('Bot başlatma hatası:', error.message, error.stack);
   }
 }
 
@@ -194,7 +182,7 @@ schedule.scheduleJob('0 */12 * * *', async () => {
 });
 
 // Start Bot
-checkWebhook();
+startBot();
 console.log('Bot çalışıyor...');
 
 // Heroku PORT
