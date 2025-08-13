@@ -8,10 +8,11 @@ const axios = require('axios');
 const WebSocket = require('ws');
 const http = require('http');
 
-// Cache for API responses and analyses
+// Cache for API responses, analyses, and Bitcoin signals
 const cache = new Map();
 const CACHE_DURATION = 3 * 60 * 1000; // 3 minutes
 const CACHE_CLEAR_INTERVAL = 30 * 1000; // 30 seconds
+const BITCOIN_SIGNAL_COOLDOWN = 10 * 60 * 1000; // 10 minutes cooldown for same signal type
 
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN || 'your-telegram-bot-token');
 const parser = new Parser();
@@ -24,8 +25,9 @@ let isBotStarted = false;
 const RATE_LIMIT_MS = 500;
 let lastGrokRequest = 0;
 
-// Deduplication for sent messages
+// Deduplication for sent messages and Bitcoin signals
 const sentMessages = new Set();
+const lastBitcoinSignal = { type: null, timestamp: 0, price: 0 };
 
 // Alarm storage
 const priceAlarms = new Map(); // coin -> {chatId, targetPrice}
@@ -669,24 +671,50 @@ async function monitorBitcoinPrice() {
 
     // Olumsuz sinyal kontrolü
     let negativeSignals = 0;
+    let signalType = '';
     const validIndicators = Object.values(indicatorsByTimeframe).filter(ind => ind !== null);
     for (const timeframe of SHORT_TIMEFRAMES) {
       const indicators = indicatorsByTimeframe[timeframe];
       if (!indicators) continue;
 
       // Teknik sinyaller
-      if (indicators.RSI < 30) negativeSignals++; // Aşırı satım
-      if (indicators.MACD < 0 && indicators.MACD < indicatorsByTimeframe[timeframe]?.signal) negativeSignals++; // MACD negatif
-      if (indicators.volumeChange < -10) negativeSignals++; // Hacim düşüşü
-      if (currentPrice < indicators.EMA50 && currentPrice < indicators.EMA200) negativeSignals++; // Fiyat EMA'ların altında
+      if (indicators.RSI < 30) {
+        negativeSignals++;
+        signalType += 'RSI<30;';
+      }
+      if (indicators.MACD < 0 && indicators.MACD < indicatorsByTimeframe[timeframe]?.signal) {
+        negativeSignals++;
+        signalType += 'MACDneg;';
+      }
+      if (indicators.volumeChange < -10) {
+        negativeSignals++;
+        signalType += 'VolDown;';
+      }
+      if (currentPrice < indicators.EMA50 && currentPrice < indicators.EMA200) {
+        negativeSignals++;
+        signalType += 'EMA;';
+      }
     }
+    if (negativeNews) signalType += 'NegativeNews;';
 
-    // Olumsuz sinyal: En az 2 teknik sinyal veya 1 teknik + 1 temel sinyal
-    const isNegative = negativeSignals >= 2 || (negativeSignals >= 1 && negativeNews);
+    // Olumsuz sinyal: 3 teknik sinyal veya 1 teknik + 1 temel sinyal
+    const isNegative = negativeSignals >= 3 || (negativeSignals >= 1 && negativeNews);
     if (!isNegative) return; // Olumsuz sinyal yoksa çık
 
+    // Deduplikasyon ve fiyat değişim kontrolü
+    const now = Date.now();
+    const priceChange = lastBitcoinSignal.price ? Math.abs(currentPrice - lastBitcoinSignal.price) / lastBitcoinSignal.price : 1;
+    if (
+      lastBitcoinSignal.type === signalType &&
+      now - lastBitcoinSignal.timestamp < BITCOIN_SIGNAL_COOLDOWN &&
+      priceChange < 0.005 // %0.5 fiyat değişimi eşiği
+    ) {
+      console.log('Aynı sinyal tipi, soğuma süresinde veya fiyat değişimi düşük, bildirim atlanıyor.');
+      return;
+    }
+
     // Bildirim gönder
-    const messageId = `BTC-Warning-${Date.now()}`;
+    const messageId = `BTC-Warning-${signalType}-${Math.floor(now / BITCOIN_SIGNAL_COOLDOWN)}`;
     if (sentMessages.has(messageId)) return; // Deduplikasyon
     sentMessages.add(messageId);
 
@@ -710,6 +738,11 @@ async function monitorBitcoinPrice() {
         await bot.telegram.sendMessage(chatId, `Yorum: ${comment}`);
       }
     }
+
+    // Son sinyali güncelle
+    lastBitcoinSignal.type = signalType;
+    lastBitcoinSignal.timestamp = now;
+    lastBitcoinSignal.price = currentPrice;
   } catch (error) {
     console.error('Bitcoin monitor error:', error);
   }
