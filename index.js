@@ -5,7 +5,7 @@ const sqlite3 = require('sqlite3').verbose();
 const { initDB, saveAnalysis, getRecentAnalyses } = require('./db');
 const { fetchNews } = require('./news');
 const { startWebSocket } = require('./websocket');
-const { analyzeCoin, fullAnalysis } = require('./analysis');
+const { analyzeCoin, fullAnalysis, fetchHttpKlines } = require('./analysis');
 
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN);
 const parser = new Parser();
@@ -25,14 +25,7 @@ bot.command('analiz', async (ctx) => {
     const news = await fetchNews();
     const messages = await fullAnalysis(news);
     for (const message of messages) {
-      if (message.length > 4000) {
-        const chunks = message.match(/.{1,4000}/g);
-        for (const chunk of chunks) {
-          await ctx.reply(chunk);
-        }
-      } else {
-        await ctx.reply(message);
-      }
+      await ctx.reply(message);
     }
     await saveAnalysis(db, { tarih: new Date().toLocaleString('tr-TR'), analiz: messages.join('\n') });
     // Grup paylaşımı için grup ID'si ekle
@@ -53,13 +46,15 @@ bot.command('alarm_kur', async (ctx) => {
     const { startPriceWebSocket } = startWebSocket(coinPair, null, async ({ price: currentPrice }) => {
       if (currentPrice <= parseFloat(price) || currentPrice >= parseFloat(price)) {
         const news = await fetchNews();
-        const analysis = await analyzeCoin(coinPair, null, news, true); // WebSocket Klines
+        const analysis = await analyzeCoin(coinPair, null, news, false); // HTTP Klines
         const timeframe = '1hour';
         const data = analysis.analyses[timeframe];
         let message = `Alarm: ${coin} ${currentPrice.toFixed(2)}'e ${currentPrice <= parseFloat(price) ? 'düştü' : 'çıktı'}!\n`;
         if (data) {
           message += `${coin} Analizi (${timeframe}, ${new Date().toLocaleString('tr-TR')}):\n`;
           message += `  Giriş: ${data.giriş.toFixed(2)}, Çıkış: ${data.çıkış.toFixed(2)}\n  Yorum: ${data.yorum}\n`;
+        } else {
+          message += 'Analiz verisi alınamadı, lütfen tekrar deneyin.\n';
         }
         if (message.length > 4000) {
           const chunks = message.match(/.{1,4000}/g);
