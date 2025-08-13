@@ -70,7 +70,7 @@ async function callGrok(prompt) {
         model: 'grok-4-0709',
         stream: false,
         temperature: 0.7,
-        max_tokens: 1200, // Artırıldı
+        max_tokens: 1200,
       },
       {
         headers: {
@@ -131,15 +131,7 @@ async function fullAnalysis(news) {
       if (negative && coin.includes('BTC') && timeframe === '1hour') {
         message += `  Alarm: Bitcoin düşüyor, dikkat! Tahmini dip: ${data.giriş.toFixed(2)}.\n`;
       }
-      // Telegram 4096 karakter sınırı için mesajları böl
-      if (message.length > 4000) {
-        const chunks = message.match(/.{1,4000}/g);
-        for (const chunk of chunks) {
-          messages.push(chunk);
-        }
-      } else {
-        messages.push(message);
-      }
+      messages.push(message);
     }
   }
   return messages;
