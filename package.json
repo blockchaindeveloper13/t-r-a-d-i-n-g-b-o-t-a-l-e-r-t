@@ -1,12 +1,12 @@
 {
-  "name": "crypto-bot",
+  "name": "trading-bot-alert",
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "telegraf": "^4.12.2",
+    "telegraf": "^4.16.3",
     "ccxt": "^4.0.0",
     "technicalindicators": "^3.1.0",
     "axios": "^1.4.0",
@@ -20,3 +20,4 @@
     "node": "18.x"
   }
 }
+
