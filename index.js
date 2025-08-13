@@ -218,6 +218,60 @@ async function getWebSocketToken() {
   }
 }
 
+async function getKucoinWebSocketPrice(coin) {
+  const token = await getWebSocketToken();
+  if (!token) {
+    console.error('KuCoin WebSocket token alınamadı.');
+    return null;
+  }
+
+  return new Promise((resolve) => {
+    const ws = new WebSocket(`wss://ws-api-spot.kucoin.com?token=${token}&connectId=${Date.now()}`);
+    let pingInterval;
+
+    ws.on('open', () => {
+      console.log(`WebSocket connected for ${coin} ticker`);
+      ws.send(JSON.stringify({
+        id: Date.now(),
+        type: 'subscribe',
+        topic: `/market/ticker:${coin}`,
+        response: true,
+      }));
+      pingInterval = setInterval(() => {
+        if (ws.isAlive === false) return ws.terminate();
+        ws.isAlive = false;
+        ws.send(JSON.stringify({ id: Date.now(), type: 'ping' }));
+      }, 20000);
+      ws.isAlive = true;
+    });
+
+    ws.on('message', (data) => {
+      try {
+        const msg = JSON.parse(data);
+        if (msg.type === 'message' && msg.topic.includes('/market/ticker')) {
+          const price = parseFloat(msg.data.price);
+          ws.close();
+          clearInterval(pingInterval);
+          resolve(price);
+        }
+        if (msg.type === 'pong') ws.isAlive = true;
+      } catch (error) {
+        console.error('WebSocket message error:', error.message);
+        resolve(null);
+      }
+    });
+
+    ws.on('error', (error) => {
+      console.error('WebSocket error:', error.message);
+      resolve(null);
+    });
+
+    ws.on('close', () => {
+      clearInterval(pingInterval);
+    });
+  });
+}
+
 async function getCoinMarketCapPrice(coin) {
   try {
     const coinId = coin.split('-')[0].toLowerCase();
@@ -253,71 +307,22 @@ async function getCoinGeckoPrice(coin) {
 }
 
 async function getCurrentPrice(coin) {
-  let price = null;
-  const token = await getWebSocketToken();
-  if (token) {
-    price = await new Promise((resolve) => {
-      const ws = new WebSocket(`wss://ws-api-spot.kucoin.com?token=${token}&connectId=${Date.now()}`);
-      let pingInterval;
-
-      ws.on('open', () => {
-        console.log(`WebSocket connected for ${coin} ticker`);
-        ws.send(JSON.stringify({
-          id: Date.now(),
-          type: 'subscribe',
-          topic: `/market/ticker:${coin}`,
-          response: true,
-        }));
-        pingInterval = setInterval(() => {
-          if (ws.isAlive === false) return ws.terminate();
-          ws.isAlive = false;
-          ws.send(JSON.stringify({ id: Date.now(), type: 'ping' }));
-        }, 20000);
-        ws.isAlive = true;
-      });
-
-      ws.on('message', (data) => {
-        try {
-          const msg = JSON.parse(data);
-          if (msg.type === 'message' && msg.topic.includes('/market/ticker')) {
-            const price = parseFloat(msg.data.price);
-            ws.close();
-            clearInterval(pingInterval);
-            resolve(price);
-          }
-          if (msg.type === 'pong') ws.isAlive = true;
-        } catch (error) {
-          console.error('WebSocket message error:', error.message);
-          resolve(null);
-        }
-      });
-
-      ws.on('error', (error) => {
-        console.error('WebSocket error:', error.message);
-        resolve(null);
-      });
-
-      ws.on('close', () => {
-        clearInterval(pingInterval);
-      });
-    });
-  }
-
+  let price = await getKucoinWebSocketPrice(coin);
   if (!price) {
-    console.log(`WebSocket başarısız, CoinMarketCap ile fiyat çekiliyor: ${coin}`);
-    price = await getCoinMarketCapPrice(coin);
-  }
-
-  if (!price) {
-    console.log(`CoinMarketCap başarısız, HTTP ile fiyat çekiliyor: ${coin}`);
+    console.log(`KuCoin WebSocket başarısız, HTTP ile fiyat çekiliyor: ${coin}`);
     try {
       const response = await axios.get(`https://api.kucoin.com/api/v1/market/stats?symbol=${coin}`);
       price = parseFloat(response.data.data.price);
       console.log(`HTTP fiyat alındı: ${coin} = ${price}`);
     } catch (error) {
-      console.error(`HTTP fiyat hatası: ${coin}`, error.message);
-      price = await getCoinGeckoPrice(coin);
+      console.error(`KuCoin HTTP fiyat hatası: ${coin}`, error.message);
+      price = await getCoinMarketCapPrice(coin);
     }
+  }
+
+  if (!price) {
+    console.log(`CoinMarketCap başarısız, CoinGecko ile fiyat çekiliyor: ${coin}`);
+    price = await getCoinGeckoPrice(coin);
   }
 
   if (price) {
@@ -631,6 +636,85 @@ async function fullAnalysis(news, chatHistory) {
   return messages;
 }
 
+// Bitcoin Minute-by-Minute Monitoring
+async function monitorBitcoinPrice() {
+  const coin = 'BTC-USDT';
+  try {
+    // KuCoin WebSocket üzerinden fiyat al
+    const currentPrice = await getKucoinWebSocketPrice(coin);
+    if (!currentPrice) {
+      console.error('Bitcoin fiyatı alınamadı.');
+      return;
+    }
+
+    // Teknik analiz için verileri al
+    const endAt = Math.floor(Date.now() / 1000);
+    const startAt = endAt - 24 * 60 * 60;
+    const klinesPromises = SHORT_TIMEFRAMES.map(timeframe => fetchHttpKlines(coin, timeframe, startAt, endAt));
+    const klinesResults = await Promise.all(klinesPromises);
+    const indicatorsByTimeframe = {};
+
+    for (let i = 0; i < SHORT_TIMEFRAMES.length; i++) {
+      const timeframe = SHORT_TIMEFRAMES[i];
+      const data = klinesResults[i];
+      if (!data.length) continue;
+
+      const indicators = calculateIndicators(data);
+      if (indicators) indicatorsByTimeframe[timeframe] = indicators;
+    }
+
+    // Temel analiz için haberleri al
+    const news = await fetchNews();
+    const negativeNews = news.some(n => n.toLowerCase().includes('düşüş') || n.toLowerCase().includes('hack') || n.toLowerCase().includes('kriz') || n.toLowerCase().includes('bearish'));
+
+    // Olumsuz sinyal kontrolü
+    let negativeSignals = 0;
+    const validIndicators = Object.values(indicatorsByTimeframe).filter(ind => ind !== null);
+    for (const timeframe of SHORT_TIMEFRAMES) {
+      const indicators = indicatorsByTimeframe[timeframe];
+      if (!indicators) continue;
+
+      // Teknik sinyaller
+      if (indicators.RSI < 30) negativeSignals++; // Aşırı satım
+      if (indicators.MACD < 0 && indicators.MACD < indicatorsByTimeframe[timeframe]?.signal) negativeSignals++; // MACD negatif
+      if (indicators.volumeChange < -10) negativeSignals++; // Hacim düşüşü
+      if (currentPrice < indicators.EMA50 && currentPrice < indicators.EMA200) negativeSignals++; // Fiyat EMA'ların altında
+    }
+
+    // Olumsuz sinyal: En az 2 teknik sinyal veya 1 teknik + 1 temel sinyal
+    const isNegative = negativeSignals >= 2 || (negativeSignals >= 1 && negativeNews);
+    if (!isNegative) return; // Olumsuz sinyal yoksa çık
+
+    // Bildirim gönder
+    const messageId = `BTC-Warning-${Date.now()}`;
+    if (sentMessages.has(messageId)) return; // Deduplikasyon
+    sentMessages.add(messageId);
+
+    const warningMessage = `🚨 Dikkat! Bitcoin düşüş sinyali veriyor! Yatırımın varsa çık, düşüş gelebilir! 🚨\nGüncel Fiyat: 💰 ${currentPrice.toFixed(2)} USDT`;
+    await bot.telegram.sendMessage(GROUP_ID, warningMessage);
+    console.log('Bitcoin düşüş uyarısı gönderildi:', warningMessage);
+
+    // Ek yorum
+    const chatHistory = await getRecentChatHistory(db, GROUP_ID);
+    const prompt = `
+      Bitcoin için düşüş sinyali tespit edildi. Güncel fiyat: ${currentPrice.toFixed(2)}. Teknik indikatörler: ${JSON.stringify(indicatorsByTimeframe, null, 2)}. Haberler: ${news.join('; ')}. Son 10 konuşma: ${chatHistory.join('; ')}.
+      Kısa, samimi, Türkçe bir yorum yap (maksimum 100 kelime, kelime sayısını yazma). Düşüş sinyaline odaklan, analiz tekrarı yapma, kullanıcıyı uyar.`;
+    const comment = await rateLimitedCallGrok(prompt) || `Hey kanka, Bitcoin'de işler karışıyor! RSI düşük, hacim düşüyor, haberler de pek iç açıcı değil. Fiyat EMA'ların altına sarktı, düşüş gelebilir. Yatırımın varsa temkinli ol, stop-loss'u kontrol et! 😬 Ne yapmayı düşünüyorsun?`;
+    await bot.telegram.sendMessage(GROUP_ID, `Yorum: ${comment}`);
+    console.log('Bitcoin düşüş yorumu gönderildi:', comment);
+
+    // Bireysel kullanıcılara da gönder (aktif alarmı olanlara)
+    for (const [key, { chatId }] of priceAlarms.entries()) {
+      if (key.includes('BTC-USDT')) {
+        await bot.telegram.sendMessage(chatId, warningMessage);
+        await bot.telegram.sendMessage(chatId, `Yorum: ${comment}`);
+      }
+    }
+  } catch (error) {
+    console.error('Bitcoin monitor error:', error);
+  }
+}
+
 // Telegram Commands
 bot.command('start', async (ctx) => {
   console.log('Start komutu alındı, chat ID:', ctx.chat.id);
@@ -875,6 +959,9 @@ schedule.scheduleJob('0 */12 * * *', async () => {
     console.error('Scheduled analysis error:', error);
   }
 });
+
+// Bitcoin her dakika izleme
+schedule.scheduleJob('* * * * *', monitorBitcoinPrice);
 
 // Keep-alive ping for Heroku
 const server = http.createServer((req, res) => res.end('Bot çalışıyor'));
