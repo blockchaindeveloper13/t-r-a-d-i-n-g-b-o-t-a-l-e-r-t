@@ -21,12 +21,28 @@ bot.command('start', async (ctx) => {
 });
 
 bot.command('analiz', async (ctx) => {
-  const news = await fetchNews();
-  const result = await fullAnalysis(news);
-  await ctx.reply(result);
-  await saveAnalysis(db, { tarih: new Date().toLocaleString('tr-TR'), analiz: result });
-  // Grup paylaşımı için grup ID'si ekle
-  // await bot.telegram.sendMessage(GROUP_ID, result);
+  try {
+    const news = await fetchNews();
+    const messages = await fullAnalysis(news);
+    for (const message of messages) {
+      if (message.length > 4000) {
+        const chunks = message.match(/.{1,4000}/g); // 4000 karakterlik parçalara böl
+        for (const chunk of chunks) {
+          await ctx.reply(chunk);
+        }
+      } else {
+        await ctx.reply(message);
+      }
+    }
+    await saveAnalysis(db, { tarih: new Date().toLocaleString('tr-TR'), analiz: messages.join('\n') });
+    // Grup paylaşımı için grup ID'si ekle
+    // for (const message of messages) {
+    //   await bot.telegram.sendMessage(GROUP_ID, message);
+    // }
+  } catch (error) {
+    console.error('Analiz error:', error);
+    await ctx.reply('Analiz sırasında bir hata oluştu. Lütfen tekrar deneyin.');
+  }
 });
 
 bot.command('alarm_kur', async (ctx) => {
@@ -36,6 +52,8 @@ bot.command('alarm_kur', async (ctx) => {
     startWebSocket(coin.toUpperCase() + '-USDT', parseFloat(price), async (currentPrice) => {
       if (currentPrice <= price) {
         await ctx.reply(`Alarm: ${coin} ${currentPrice.toFixed(2)}'e düştü!`);
+      } else if (currentPrice >= price) {
+        await ctx.reply(`Alarm: ${coin} ${currentPrice.toFixed(2)}'e çıktı!`);
       }
     });
     await ctx.reply(`${coin} için ${price} alarmı kuruldu.`);
@@ -49,23 +67,38 @@ bot.on('text', async (ctx) => {
   const text = ctx.message.text.toLowerCase();
   const coin = COINS.find(c => text.includes(c.split('-')[0].toLowerCase()));
   if (coin) {
-    const news = await fetchNews();
-    const analysis = await require('./analysis').analyzeCoin(coin);
-    let message = `${coin} Analizi (${new Date().toLocaleString('tr-TR')}):\n`;
-    for (const [timeframe, data] of Object.entries(analysis.analyses)) {
-      message += `  ${timeframe}: Giriş: ${data.giriş.toFixed(2)}, Çıkış: ${data.çıkış.toFixed(2)}\n  Yorum: ${data.yorum}\n\n`;
+    try {
+      const news = await fetchNews();
+      const analysis = await require('./analysis').analyzeCoin(coin, null, news);
+      let message = `${coin} Analizi (${new Date().toLocaleString('tr-TR')}):\n`;
+      for (const [timeframe, data] of Object.entries(analysis.analyses)) {
+        message += `  ${timeframe}: Giriş: ${data.giriş.toFixed(2)}, Çıkış: ${data.çıkış.toFixed(2)}\n  Yorum: ${data.yorum}\n\n`;
+        if (message.length > 3500) {
+          await ctx.reply(message);
+          message = '';
+        }
+      }
+      if (message) await ctx.reply(message);
+      await saveAnalysis(db, { tarih: analysis.tarih, analiz: message });
+    } catch (error) {
+      console.error('Özel analiz error:', error);
+      await ctx.reply('Analiz sırasında bir hata oluştu. Lütfen tekrar deneyin.');
     }
-    await ctx.reply(message);
-    await saveAnalysis(db, { tarih: analysis.tarih, analiz: message });
   }
 });
 
 // Schedule
 schedule.scheduleJob('0 */12 * * *', async () => {
-  const news = await fetchNews();
-  const result = await fullAnalysis(news);
-  // Kullanıcıya/gruba gönder
-  // await bot.telegram.sendMessage(CHAT_ID, result);
+  try {
+    const news = await fetchNews();
+    const messages = await fullAnalysis(news);
+    // Kullanıcıya/gruba gönder
+    // for (const message of messages) {
+    //   await bot.telegram.sendMessage(CHAT_ID, message);
+    // }
+  } catch (error) {
+    console.error('Schedule error:', error);
+  }
 });
 
 // Start Bot
