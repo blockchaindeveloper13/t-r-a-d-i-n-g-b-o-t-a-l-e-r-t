@@ -11,6 +11,7 @@ const http = require('http');
 // Cache for API responses
 const cache = new Map();
 const CACHE_DURATION = 3 * 60 * 1000; // 3 minutes
+const CACHE_CLEAR_INTERVAL = 30 * 1000; // 30 seconds
 
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN || '7551795139:AAHJa1du2jRmmA1gmTPIHwJbUsRT7wOksaI');
 const parser = new Parser();
@@ -20,8 +21,11 @@ const GROUP_ID = '-1002869335730'; // @tradingroup95
 let isBotStarted = false;
 
 // Rate limit control for Grok API
-const RATE_LIMIT_MS = 300;
+const RATE_LIMIT_MS = 500;
 let lastGrokRequest = 0;
+
+// Alarm storage
+const priceAlarms = new Map(); // coin -> {chatId, targetPrice}
 
 async function rateLimitedCallGrok(prompt) {
   const now = Date.now();
@@ -44,7 +48,10 @@ async function rateLimitedCallGrok(prompt) {
       'https://api.x.ai/v1/chat/completions',
       {
         messages: [
-          { role: 'system', content: 'Sen bir kripto para analiz botusun. Kısa vadeli zaman dilimlerini (1min, 5min, 30min, 1hour) inceleyip teknik ve temel analize dayalı kısa, samimi, anlaşılır Türkçe yorum yap (maksimum 300 kelime). Güncel fiyat (💰), giriş (📉) ve çıkış (📈) fiyatlarını kendin belirle, verilere dayalı mantıklı olsun. Temel analiz için haberlerin pozitif/negatif etkisini vurgula. Konuşma geçmişini dikkate al, samimi sohbet et.' },
+          {
+            role: 'system',
+            content: 'Sen bir kripto para analiz botusun, Grok-4-0709 modelini kullanıyorsun. Kısa vadeli zaman dilimlerini (1min, 5min, 30min, 1hour) inceleyip teknik ve temel analize dayalı kısa, samimi, anlaşılır Türkçe yorum yap (maksimum 300 kelime). Güncel fiyat (💰), giriş (📉) ve çıkış (📈) fiyatlarını kendin belirle, verilere dayalı mantıklı olsun. Giriş fiyatını belirlerken fiyatın düşebileceği potansiyel dip seviyelerini (SMA-50, PSAR, Fibonacci %38.2, ATR) analiz et, güncel fiyattan direkt giriş önerme, kâr marjını maksimize et. Çıkış için kısa vadeli (4-6 saat) ve uzun vadeli (1-2 hafta) hedefler ver. Temel analiz için haberlerin pozitif/negatif etkisini vurgula. Konuşma geçmişini dikkate al, samimi sohbet et.'
+          },
           { role: 'user', content: prompt },
         ],
         model: 'grok-4-0709',
@@ -182,58 +189,90 @@ async function getWebSocketToken() {
   }
 }
 
-async function getCurrentPrice(coin) {
-  const token = await getWebSocketToken();
-  if (!token) {
-    console.error('WebSocket token alınamadı.');
+async function getCoinGeckoPrice(coin) {
+  try {
+    const coinId = coin.split('-')[0].toLowerCase();
+    const response = await axios.get(`https://api.coingecko.com/api/v3/simple/price?ids=${coinId}&vs_currencies=usd`);
+    const price = parseFloat(response.data[coinId].usd);
+    console.log(`CoinGecko fiyat alındı: ${coin} = ${price}`);
+    return price;
+  } catch (error) {
+    console.error(`CoinGecko fiyat hatası: ${coin}`, error.message);
     return null;
   }
+}
 
-  return new Promise((resolve) => {
-    const ws = new WebSocket(`wss://ws-api-spot.kucoin.com?token=${token}&connectId=${Date.now()}`);
-    let pingInterval;
+async function getCurrentPrice(coin) {
+  let price = null;
+  const token = await getWebSocketToken();
+  if (token) {
+    price = await new Promise((resolve) => {
+      const ws = new WebSocket(`wss://ws-api-spot.kucoin.com?token=${token}&connectId=${Date.now()}`);
+      let pingInterval;
 
-    ws.on('open', () => {
-      console.log(`WebSocket connected for ${coin} ticker`);
-      ws.send(JSON.stringify({
-        id: Date.now(),
-        type: 'subscribe',
-        topic: `/market/ticker:${coin}`,
-        response: true,
-      }));
-      pingInterval = setInterval(() => {
-        if (ws.isAlive === false) return ws.terminate();
-        ws.isAlive = false;
-        ws.send(JSON.stringify({ id: Date.now(), type: 'ping' }));
-      }, 20000);
-      ws.isAlive = true;
-    });
+      ws.on('open', () => {
+        console.log(`WebSocket connected for ${coin} ticker`);
+        ws.send(JSON.stringify({
+          id: Date.now(),
+          type: 'subscribe',
+          topic: `/market/ticker:${coin}`,
+          response: true,
+        }));
+        pingInterval = setInterval(() => {
+          if (ws.isAlive === false) return ws.terminate();
+          ws.isAlive = false;
+          ws.send(JSON.stringify({ id: Date.now(), type: 'ping' }));
+        }, 20000);
+        ws.isAlive = true;
+      });
 
-    ws.on('message', (data) => {
-      try {
-        const msg = JSON.parse(data);
-        if (msg.type === 'message' && msg.topic.includes('/market/ticker')) {
-          const price = parseFloat(msg.data.price);
-          ws.close();
-          clearInterval(pingInterval);
-          resolve(price);
+      ws.on('message', (data) => {
+        try {
+          const msg = JSON.parse(data);
+          if (msg.type === 'message' && msg.topic.includes('/market/ticker')) {
+            const price = parseFloat(msg.data.price);
+            ws.close();
+            clearInterval(pingInterval);
+            resolve(price);
+          }
+          if (msg.type === 'pong') ws.isAlive = true;
+        } catch (error) {
+          console.error('WebSocket message error:', error.message);
+          resolve(null);
         }
-        if (msg.type === 'pong') ws.isAlive = true;
-      } catch (error) {
-        console.error('WebSocket message error:', error.message);
+      });
+
+      ws.on('error', (error) => {
+        console.error('WebSocket error:', error.message);
         resolve(null);
-      }
-    });
+      });
 
-    ws.on('error', (error) => {
-      console.error('WebSocket error:', error.message);
-      resolve(null);
+      ws.on('close', () => {
+        clearInterval(pingInterval);
+      });
     });
+  }
 
-    ws.on('close', () => {
-      clearInterval(pingInterval);
-    });
-  });
+  if (!price) {
+    console.log(`WebSocket başarısız, HTTP ile fiyat çekiliyor: ${coin}`);
+    try {
+      const response = await axios.get(`https://api.kucoin.com/api/v1/market/stats?symbol=${coin}`);
+      price = parseFloat(response.data.data.price);
+      console.log(`HTTP fiyat alındı: ${coin} = ${price}`);
+    } catch (error) {
+      console.error(`HTTP fiyat hatası: ${coin}`, error.message);
+      price = await getCoinGeckoPrice(coin);
+    }
+  }
+
+  if (price) {
+    const cgPrice = await getCoinGeckoPrice(coin);
+    if (cgPrice && Math.abs(price - cgPrice) / cgPrice > 0.1) {
+      console.log(`Fiyat uyuşmazlığı: KuCoin=${price}, CoinGecko=${cgPrice}, CoinGecko kullanılıyor`);
+      price = cgPrice;
+    }
+  }
+  return price;
 }
 
 async function startWebSocket(coin, targetPrice, callback) {
@@ -356,6 +395,24 @@ function calculateIndicators(data) {
   }
 }
 
+function calculateATR(data) {
+  if (!data || data.length < 15) return 0;
+  const highs = data.map(d => d.high);
+  const lows = data.map(d => d.low);
+  const closes = data.map(d => d.close);
+  let trs = [];
+  for (let i = 1; i < data.length; i++) {
+    const tr = Math.max(
+      highs[i] - lows[i],
+      Math.abs(highs[i] - closes[i - 1]),
+      Math.abs(lows[i] - closes[i - 1])
+    );
+    trs.push(tr);
+  }
+  const atr = trs.slice(-14).reduce((sum, val) => sum + val, 0) / 14;
+  return atr;
+}
+
 function generateFallbackComment(indicatorsByTimeframe, btcStatus, currentPrice, coin, news) {
   let comment = `BTC durumu: ${btcStatus}. `;
   const validIndicators = Object.values(indicatorsByTimeframe).filter(ind => ind !== null);
@@ -396,30 +453,35 @@ async function analyzeCoin(coin, btcData = null, news = [], chatHistory = []) {
   const btcIndicators = btcData ? calculateIndicators(btcData) : null;
   const btcStatus = btcIndicators && btcIndicators.EMA50 > btcIndicators.EMA200 ? 'Yükselişte' : 'Düşüşte';
   const newsSummary = news.length ? news.join('; ') : 'Haber bulunamadı.';
+  const atr = calculateATR(klinesResults[SHORT_TIMEFRAMES.indexOf('1hour')]);
 
   const prompt = `
     ${coin} için kısa vadeli (1min, 5min, 30min, 1hour) teknik ve temel analiz yap.
     İndikatörler: ${JSON.stringify(indicatorsByTimeframe, null, 2)}.
     Güncel fiyat: ${currentPrice ? currentPrice.toFixed(2) : 'Bilinmiyor'}.
+    ATR (1sa): ${atr.toFixed(2)}.
     BTC durumu: ${btcStatus}, Haberler: ${newsSummary}.
     Son 10 konuşma: ${chatHistory.join('; ')}.
-    Giriş (📉) ve çıkış (📈) fiyatlarını kendin belirle, verilere dayalı mantıklı öneriler yap. Kısa, samimi Türkçe yorum (maksimum 300 kelime). Haberlerin pozitif/negatif etkisini vurgula.`;
+    Giriş (📉) fiyatını belirlerken fiyatın düşebileceği potansiyel dip seviyelerini (SMA-50, PSAR, Fibonacci %38.2, ATR) analiz et, güncel fiyattan direkt giriş önerme, kâr marjını maksimize et. Çıkış (📈) için kısa vadeli (4-6 saat) ve uzun vadeli (1-2 hafta) hedefler ver. Kısa, samimi Türkçe yorum (maksimum 300 kelime). Haberlerin pozitif/negatif etkisini vurgula.`;
   let comment = await rateLimitedCallGrok(prompt);
   if (!comment) {
     comment = generateFallbackComment(indicatorsByTimeframe, btcStatus, currentPrice, coin, news);
   }
 
-  // Grok'un önerdiği fiyatları parse et
+  // Grok’un önerdiği fiyatları parse et
   let dip = currentPrice || 0;
   let tp = currentPrice ? currentPrice * 1.1 : 0;
+  let longTp = tp;
   const priceMatch = comment.match(/📉 (\d+\.?\d*)/);
   const tpMatch = comment.match(/📈 (\d+\.?\d*)/);
+  const longTpMatch = comment.match(/Uzun vadeli 📈 (\d+\.?\d*)/);
   if (priceMatch && tpMatch) {
     dip = parseFloat(priceMatch[1]);
     tp = parseFloat(tpMatch[1]);
+    longTp = longTpMatch ? parseFloat(longTpMatch[1]) : tp * 1.5;
   }
 
-  result.analyses = { giriş: dip, çıkış: tp, currentPrice, yorum: comment, indicators: indicatorsByTimeframe };
+  result.analyses = { giriş: dip, çıkış: tp, longTermÇıkış: longTp, currentPrice, yorum: comment, indicators: indicatorsByTimeframe };
   return result;
 }
 
@@ -431,6 +493,7 @@ async function fullAnalysis(news, chatHistory) {
     let message = `${coin} Analizi (${new Date().toLocaleString('tr-TR')}):\n`;
     message += `  Güncel Fiyat: 💰 ${analysis.analyses.currentPrice ? analysis.analyses.currentPrice.toFixed(2) : 'Bilinmiyor'}\n`;
     message += `  Giriş: 📉 ${analysis.analyses.giriş.toFixed(2)}, Çıkış: 📈 ${analysis.analyses.çıkış.toFixed(2)}\n`;
+    message += `  Uzun Vadeli Çıkış: 📈 ${analysis.analyses.longTermÇıkış.toFixed(2)}\n`;
     message += `  Yorum: ${analysis.analyses.yorum}\n`;
     const negative = news.some(n => n.toLowerCase().includes('düşüş') || n.toLowerCase().includes('hack'));
     if (negative && coin.includes('BTC')) {
@@ -444,7 +507,7 @@ async function fullAnalysis(news, chatHistory) {
 // Telegram Commands
 bot.command('start', async (ctx) => {
   console.log('Start komutu alındı, chat ID:', ctx.chat.id);
-  await ctx.reply('Merhaba! Kripto analiz botu hazır. /analiz coin ile başla (ör. /analiz ADA) veya coin sor (ör. "ADA ne durumda?"). 😎');
+  await ctx.reply('Merhaba! Kripto analiz botu hazır. /analiz coin ile başla (ör. /analiz ADA) veya coin sor (ör. "ADA ne durumda?"). Fiyat alarmı için /alarm_kur coin fiyat (ör. /alarm_kur XLM 0.50). 😎');
   await saveChatHistory(db, ctx.chat.id.toString(), ctx.message.text);
 });
 
@@ -464,6 +527,7 @@ bot.command(/analiz(?:@traderbot95_bot)?/, async (ctx) => {
     let message = `${coin} Analizi (${new Date().toLocaleString('tr-TR')}):\n`;
     message += `  Güncel Fiyat: 💰 ${analysis.analyses.currentPrice ? analysis.analyses.currentPrice.toFixed(2) : 'Bilinmiyor'}\n`;
     message += `  Giriş: 📉 ${analysis.analyses.giriş.toFixed(2)}, Çıkış: 📈 ${analysis.analyses.çıkış.toFixed(2)}\n`;
+    message += `  Uzun Vadeli Çıkış: 📈 ${analysis.analyses.longTermÇıkış.toFixed(2)}\n`;
     message += `  Yorum: ${analysis.analyses.yorum}\n`;
     await ctx.reply(message);
     if (ctx.chat.id.toString() === GROUP_ID) {
@@ -483,33 +547,46 @@ bot.command('alarm_kur', async (ctx) => {
   if (args.length === 2) {
     const [coin, price] = args;
     const coinPair = coin.toUpperCase() + '-USDT';
+    if (!COINS.includes(coinPair)) {
+      await ctx.reply('Lütfen geçerli bir coin belirt (ör. /alarm_kur ADA 1.50). 😊');
+      return;
+    }
+    const targetPrice = parseFloat(price);
+    if (isNaN(targetPrice)) {
+      await ctx.reply('Geçerli bir fiyat gir (ör. /alarm_kur XLM 0.50). 😊');
+      return;
+    }
     await ctx.reply(`${coin} için ${price} alarmını kuruyorum, biraz bekle! 😎`);
-    const { startPriceWebSocket } = startWebSocket(coinPair, null, async ({ price: currentPrice }) => {
-      if (currentPrice <= parseFloat(price) || currentPrice >= parseFloat(price)) {
+    priceAlarms.set(`${coinPair}-${ctx.chat.id}`, { chatId: ctx.chat.id.toString(), targetPrice });
+    const { startPriceWebSocket } = startWebSocket(coinPair, targetPrice, async ({ price: currentPrice }) => {
+      if (Math.abs(currentPrice - targetPrice) <= 0.01 * targetPrice) { // %1 tolerans
         try {
           const news = await fetchNews();
           const chatHistory = await getRecentChatHistory(db, ctx.chat.id.toString());
           const analysis = await analyzeCoin(coinPair, null, news, chatHistory);
-          let message = `Alarm: ${coin} ${currentPrice.toFixed(2)}'e ${currentPrice <= parseFloat(price) ? 'düştü' : 'çıktı'}! 🚨\n`;
+          let message = `Alarm: ${coin} ${currentPrice.toFixed(2)}'e ${currentPrice <= targetPrice ? 'düştü' : 'çıktı'}! 🚨\n`;
           message += `${coin} Analizi (${new Date().toLocaleString('tr-TR')}):\n`;
           message += `  Güncel Fiyat: 💰 ${analysis.analyses.currentPrice ? analysis.analyses.currentPrice.toFixed(2) : 'Bilinmiyor'}\n`;
           message += `  Giriş: 📉 ${analysis.analyses.giriş.toFixed(2)}, Çıkış: 📈 ${analysis.analyses.çıkış.toFixed(2)}\n`;
+          message += `  Uzun Vadeli Çıkış: 📈 ${analysis.analyses.longTermÇıkış.toFixed(2)}\n`;
           message += `  Yorum: ${analysis.analyses.yorum}\n`;
           await ctx.reply(message);
           if (ctx.chat.id.toString() === GROUP_ID) {
             await bot.telegram.sendMessage(GROUP_ID, message);
           }
+          await bot.telegram.sendMessage('1616739367', message); // Bireysel chat ID
+          priceAlarms.delete(`${coinPair}-${ctx.chat.id}`); // Alarmı sil
         } catch (error) {
           console.error('Alarm error:', error);
           await ctx.reply(`Alarm: ${coin} ${currentPrice.toFixed(2)}'e ulaştı, ancak analiz alınamadı. 😓`);
         }
       }
     });
-    startPriceWebSocket(coinPair, parseFloat(price), () => {});
+    startPriceWebSocket(coinPair, targetPrice, () => {});
     await ctx.reply(`${coin} için ${price} alarmı kuruldu. 🔔`);
     await saveChatHistory(db, ctx.chat.id.toString(), ctx.message.text);
   } else {
-    await ctx.reply('Kullanım: /alarm_kur coin fiyat');
+    await ctx.reply('Kullanım: /alarm_kur coin fiyat (ör. /alarm_kur XLM 0.50)');
   }
 });
 
@@ -546,15 +623,18 @@ bot.on('text', async (ctx) => {
       let message = `${coin} Analizi (${new Date().toLocaleString('tr-TR')}):\n`;
       message += `  Güncel Fiyat: 💰 ${analysis.analyses.currentPrice ? analysis.analyses.currentPrice.toFixed(2) : 'Bilinmiyor'}\n`;
       message += `  Giriş: 📉 ${analysis.analyses.giriş.toFixed(2)}, Çıkış: 📈 ${analysis.analyses.çıkış.toFixed(2)}\n`;
+      message += `  Uzun Vadeli Çıkış: 📈 ${analysis.analyses.longTermÇıkış.toFixed(2)}\n`;
       message += `  Yorum: ${analysis.analyses.yorum}`;
       await ctx.reply(message);
       if (ctx.chat.id.toString() === GROUP_ID) {
         await bot.telegram.sendMessage(GROUP_ID, message);
       }
       await saveAnalysis(db, { tarih: new Date().toLocaleString('tr-TR'), coin, analiz: JSON.stringify(analysis.analyses) });
+    } else if (text.includes('grok') && (text.includes('versiyon') || text.includes('model'))) {
+      await ctx.reply('Haha, kanka, ben Grok-4-0709 modelini kullanıyorum, xAI’nin en son harikası! 😎 Kripto analizleri için tam gaz buradayım. Başka neyi merak ediyorsun, XLM mi, AAVE mi, yoksa başka bi’ coin mi? 🚀');
     } else {
       console.log('Genel sohbet, metin:', text);
-      const prompt = `Kullanıcı mesajı: "${text}". Son 10 konuşma: ${chatHistory.join('; ')}. Kripto analiz botusun, kısa ve doğal Türkçe yanıt ver, sohbet tarzında. Coin analizi istersen analiz yap, yoksa bağlama uygun samimi sohbet et. 😊`;
+      const prompt = `Kullanıcı mesajı: "${text}". Son 10 konuşma: ${chatHistory.join('; ')}. Sen Grok-4-0709’sun, kripto analiz botusun, kısa ve doğal Türkçe yanıt ver, sohbet tarzında. Coin analizi istersen analiz yap, yoksa bağlama uygun samimi sohbet et. 😊`;
       const comment = await rateLimitedCallGrok(prompt);
       await ctx.reply(comment || 'Üzgünüm, bu konuda yorum yapamadım. Bir coin belirtir misin ya da başka ne konuşalım? 🤔');
     }
@@ -587,6 +667,9 @@ server.listen(process.env.PORT || 3000);
 setInterval(() => {
   http.get(`http://${process.env.HEROKU_APP_NAME || 'localhost'}:${process.env.PORT || 3000}`);
 }, 25 * 60 * 1000); // Every 25 minutes
+
+// Cache cleanup
+setInterval(() => cache.clear(), CACHE_CLEAR_INTERVAL);
 
 // Handle SIGTERM
 process.on('SIGTERM', () => {
