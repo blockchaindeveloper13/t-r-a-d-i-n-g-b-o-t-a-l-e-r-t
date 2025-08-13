@@ -7,7 +7,10 @@ const { fetchNews } = require('./news');
 const { startWebSocket } = require('./websocket');
 const { analyzeCoin, fullAnalysis, fetchHttpKlines } = require('./analysis');
 
-const bot = new Telegraf(process.env.TELEGRAM_TOKEN || '7551795139:AAHJa1du2jRmmA1gmTPIHwJbUsRT7wOksaI');
+const bot = new Telegraf(process.env.TELEGRAM_TOKEN || '7551795139:AAHJa1du2jRmmA1gmTPIHwJbUsRT7wOksaI', {
+  telegram: { webhook: false },
+  handlerTimeout: 900000 // 15 dakika timeout
+});
 const parser = new Parser();
 const COINS = ['AAVE-USDT', 'COMP-USDT', 'LTC-USDT', 'XLM-USDT', 'ADA-USDT', 'MKR-USDT', 'BTC-USDT'];
 const GROUP_ID = '-1002869335730'; // @tradingroup95 grup ID'si
@@ -19,11 +22,18 @@ initDB(db);
 // Botu polling modunda başlat
 async function startBot() {
   try {
-    await bot.launch({ webhook: null });
+    await bot.launch({
+      polling: {
+        interval: 300, // 300ms polling intervali
+        timeout: 30 // 30 saniye timeout
+      }
+    });
     console.log('Bot polling modunda başlatıldı.');
     await bot.telegram.sendMessage(GROUP_ID, 'Merhaba @tradingroup95! Kripto analiz botu aktif. /analiz ile başlayın veya coin sor (ör. "ADA ne durumda?").');
   } catch (error) {
     console.error('Bot başlatma hatası:', error.message, error.stack);
+    console.log('5 saniye sonra tekrar deneniyor...');
+    setTimeout(startBot, 5000);
   }
 }
 
