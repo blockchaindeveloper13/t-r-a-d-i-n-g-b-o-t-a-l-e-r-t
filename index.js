@@ -10,9 +10,9 @@ const http = require('http');
 
 // Cache for API responses, analyses, and Bitcoin signals
 const cache = new Map();
-const CACHE_DURATION = 3 * 60 * 1000; // 3 minutes
+const CACHE_DURATION = 2 * 60 * 60 * 1000; // 2 hours (Grok API limitlerini korumak için)
 const CACHE_CLEAR_INTERVAL = 30 * 1000; // 30 seconds
-const BITCOIN_SIGNAL_COOLDOWN = 10 * 60 * 1000; // 10 minutes cooldown for same signal type
+const BITCOIN_SIGNAL_COOLDOWN = 2 * 60 * 60 * 1000; // 2 hours cooldown for same signal type
 
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN || 'your-telegram-bot-token');
 const parser = new Parser();
@@ -27,7 +27,7 @@ let lastGrokRequest = 0;
 
 // Deduplication for sent messages and Bitcoin signals
 const sentMessages = new Set();
-const lastBitcoinSignal = { type: null, timestamp: 0, price: 0 };
+const lastBitcoinSignal = { type: null, timestamp: 0, price: 0, comment: null };
 
 // Alarm storage
 const priceAlarms = new Map(); // coin -> {chatId, targetPrice}
@@ -722,12 +722,16 @@ async function monitorBitcoinPrice() {
     await bot.telegram.sendMessage(GROUP_ID, warningMessage);
     console.log('Bitcoin düşüş uyarısı gönderildi:', warningMessage);
 
-    // Ek yorum
-    const chatHistory = await getRecentChatHistory(db, GROUP_ID);
-    const prompt = `
-      Bitcoin için düşüş sinyali tespit edildi. Güncel fiyat: ${currentPrice.toFixed(2)}. Teknik indikatörler: ${JSON.stringify(indicatorsByTimeframe, null, 2)}. Haberler: ${news.join('; ')}. Son 10 konuşma: ${chatHistory.join('; ')}.
-      Kısa, samimi, Türkçe bir yorum yap (maksimum 100 kelime, kelime sayısını yazma). Düşüş sinyaline odaklan, analiz tekrarı yapma, kullanıcıyı uyar.`;
-    const comment = await rateLimitedCallGrok(prompt) || `Hey kanka, Bitcoin'de işler karışıyor! RSI düşük, hacim düşüyor, haberler de pek iç açıcı değil. Fiyat EMA'ların altına sarktı, düşüş gelebilir. Yatırımın varsa temkinli ol, stop-loss'u kontrol et! 😬 Ne yapmayı düşünüyorsun?`;
+    // Ek yorum (önbellekten al veya yeni oluştur)
+    let comment = lastBitcoinSignal.comment;
+    if (!comment || now - lastBitcoinSignal.timestamp >= BITCOIN_SIGNAL_COOLDOWN) {
+      const chatHistory = await getRecentChatHistory(db, GROUP_ID);
+      const prompt = `
+        Bitcoin için düşüş sinyali tespit edildi. Güncel fiyat: ${currentPrice.toFixed(2)}. Teknik indikatörler: ${JSON.stringify(indicatorsByTimeframe, null, 2)}. Haberler: ${news.join('; ')}. Son 10 konuşma: ${chatHistory.join('; ')}.
+        Kısa, samimi, Türkçe bir yorum yap (maksimum 100 kelime, kelime sayısını yazma). Düşüş sinyaline odaklan, analiz tekrarı yapma, kullanıcıyı uyar.`;
+      comment = await rateLimitedCallGrok(prompt) || `Hey kanka, Bitcoin'de işler karışıyor! RSI düşük, hacim düşüyor, haberler de pek iç açıcı değil. Fiyat EMA'ların altına sarktı, düşüş gelebilir. Yatırımın varsa temkinli ol, stop-loss'u kontrol et! 😬 Ne yapmayı düşünüyorsun?`;
+      lastBitcoinSignal.comment = comment; // Yorumu önbelleğe al
+    }
     await bot.telegram.sendMessage(GROUP_ID, `Yorum: ${comment}`);
     console.log('Bitcoin düşüş yorumu gönderildi:', comment);
 
