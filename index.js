@@ -24,16 +24,18 @@ async function checkWebhook() {
     if (webhookInfo.url) {
       console.log('Webhook bulundu, siliniyor...');
       await bot.telegram.deleteWebhook();
-      console.log('Webhook silindi, polling moduna geçiliyor.');
+      console.log('Webhook silindi.');
     }
-    await bot.launch({ webhook: null });
-    console.log('Bot polling modunda başlatıldı.');
-    // Grup hoş geldin mesajı
-    await bot.telegram.sendMessage(GROUP_ID, 'Merhaba @tradingroup95! Kripto analiz botu aktif. /analiz ile başlayın veya coin sor (ör. "ADA ne durumda?").');
   } catch (error) {
     console.error('Webhook kontrol hatası:', error.message, error.stack);
+  }
+  // Polling'i ayrı başlat
+  try {
     await bot.launch({ webhook: null });
-    console.log('Bot polling modunda başlatıldı (hata sonrası).');
+    console.log('Bot polling modunda başlatıldı.');
+    await bot.telegram.sendMessage(GROUP_ID, 'Merhaba @tradingroup95! Kripto analiz botu aktif. /analiz ile başlayın veya coin sor (ör. "ADA ne durumda?").');
+  } catch (error) {
+    console.error('Polling başlatma hatası:', error.message, error.stack);
   }
 }
 
