@@ -3,10 +3,15 @@ const axios = require('axios');
 
 async function getWebSocketToken() {
   try {
-    const response = await axios.get('https://api.kucoin.com/api/v1/bullet-public');
+    const response = await axios.post('https://api.kucoin.com/api/v1/bullet-public', {}, {
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    });
+    console.log('WebSocket token response:', response.data);
     return response.data.data.token;
   } catch (error) {
-    console.error('KuCoin WebSocket token error:', error.message);
+    console.error('KuCoin WebSocket token error:', error.response?.data || error.message);
     return null;
   }
 }
@@ -14,24 +19,24 @@ async function getWebSocketToken() {
 async function startWebSocket(coin, timeframe, callback) {
   const token = await getWebSocketToken();
   if (!token) {
-    console.error('WebSocket token alınamadı.');
-    return;
+    console.error('WebSocket token alınamadı, HTTP Klines kullanılacak.');
+    return { ws: null, startPriceWebSocket: () => {}, fetchKlines: () => [] };
   }
 
   const ws = new WebSocket(`wss://ws-api-spot.kucoin.com?token=${token}&connectId=${Date.now()}`);
   let pingInterval;
+  const klines = [];
 
   ws.on('open', () => {
     console.log(`WebSocket connected for ${coin}_${timeframe}`);
     const subscribeMsg = {
       id: Date.now(),
       type: 'subscribe',
-      topic: `/market/candles:${coin}_${timeframe}`,
+      topic: timeframe ? `/market/candles:${coin}_${timeframe}` : `/market/ticker:${coin}`,
       response: true,
     };
     ws.send(JSON.stringify(subscribeMsg));
 
-    // Keep-alive için ping
     pingInterval = setInterval(() => {
       ws.send(JSON.stringify({ id: Date.now(), type: 'ping' }));
     }, 20000);
@@ -40,17 +45,23 @@ async function startWebSocket(coin, timeframe, callback) {
   ws.on('message', (data) => {
     try {
       const msg = JSON.parse(data);
-      if (msg.type === 'message' && msg.topic.includes('/market/candles')) {
-        const { symbol, candles } = msg.data;
-        const [time, open, close, high, low, volume, amount] = candles;
-        callback({
-          timestamp: new Date(parseInt(time) * 1000).toISOString(),
-          open: parseFloat(open),
-          high: parseFloat(high),
-          low: parseFloat(low),
-          close: parseFloat(close),
-          volume: parseFloat(volume),
-        });
+      if (msg.type === 'message') {
+        if (msg.topic.includes('/market/ticker')) {
+          const price = parseFloat(msg.data.price);
+          callback({ price });
+        } else if (msg.topic.includes('/market/candles')) {
+          const { candles } = msg.data;
+          const [time, open, close, high, low, volume, amount] = candles;
+          klines.push({
+            timestamp: new Date(parseInt(time) * 1000).toISOString(),
+            open: parseFloat(open),
+            high: parseFloat(high),
+            low: parseFloat(low),
+            close: parseFloat(close),
+            volume: parseFloat(volume),
+          });
+          callback({ klines });
+        }
       }
     } catch (error) {
       console.error('WebSocket message error:', error.message);
@@ -67,21 +78,13 @@ async function startWebSocket(coin, timeframe, callback) {
     setTimeout(() => startWebSocket(coin, timeframe, callback), 5000);
   });
 
-  // Fiyat alarmı için mevcut WebSocket mantığı
-  async function startPriceWebSocket(coin, targetPrice, priceCallback) {
-    const kucoin = new ccxt.kucoin({ enableRateLimit: true });
-    while (true) {
-      try {
-        const ticker = await kucoin.fetchTicker(coin);
-        priceCallback(ticker.last);
-        await new Promise(resolve => setTimeout(resolve, 60000));
-      } catch (e) {
-        console.error('Price WebSocket error:', e);
-      }
-    }
-  }
-
-  return { ws, startPriceWebSocket };
+  return {
+    ws,
+    startPriceWebSocket: (coin, targetPrice, priceCallback) => {
+      if (!timeframe) callback({ price: targetPrice });
+    },
+    fetchKlines: () => klines.slice(-200), // Son 200 veriyi dön
+  };
 }
 
 module.exports = { startWebSocket };
