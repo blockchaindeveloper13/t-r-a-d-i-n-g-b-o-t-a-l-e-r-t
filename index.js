@@ -21,7 +21,7 @@ const GROUP_ID = '-1002869335730'; // @tradingroup95 grup ID'si
 let isBotStarted = false;
 
 // Rate limit control for Grok API
-const RATE_LIMIT_MS = 1000; // 1 second between requests
+const RATE_LIMIT_MS = 500; // 500ms between requests
 let lastGrokRequest = 0;
 
 async function rateLimitedCallGrok(prompt) {
@@ -35,6 +35,7 @@ async function rateLimitedCallGrok(prompt) {
   if (cache.has(cacheKey)) {
     const cached = cache.get(cacheKey);
     if (Date.now() - cached.timestamp < CACHE_DURATION) {
+      console.log('Cache hit for:', cacheKey);
       return cached.data;
     }
   }
@@ -91,10 +92,15 @@ async function saveAnalysis(db, analysis) {
       analysis.coin || 'Tüm coinler',
       JSON.stringify(analysis)
     ], (err) => {
-      if (err) reject(err);
+      if (err) {
+        console.error('Save analysis error:', err);
+        reject(err);
+      }
       db.run(`DELETE FROM analizler WHERE id NOT IN (SELECT id FROM analizler ORDER BY id DESC LIMIT 100)`, (err) => {
-        if (err) reject(err);
-        else resolve();
+        if (err) {
+          console.error('Delete old analyses error:', err);
+          reject(err);
+        } else resolve();
       });
     });
   });
@@ -103,8 +109,10 @@ async function saveAnalysis(db, analysis) {
 async function getRecentAnalyses(db) {
   return new Promise((resolve, reject) => {
     db.all(`SELECT * FROM analizler ORDER BY id DESC LIMIT 100`, [], (err, rows) => {
-      if (err) reject(err);
-      else resolve(rows);
+      if (err) {
+        console.error('Get recent analyses error:', err);
+        reject(err);
+      } else resolve(rows);
     });
   });
 }
@@ -222,6 +230,7 @@ async function fetchHttpKlines(coin, timeframe, startAt = 0, endAt = 0) {
   if (cache.has(cacheKey)) {
     const cached = cache.get(cacheKey);
     if (Date.now() - cached.timestamp < CACHE_DURATION) {
+      console.log('Cache hit for klines:', cacheKey);
       return cached.data;
     }
   }
@@ -331,24 +340,26 @@ async function fullAnalysis(news) {
 // Telegram Commands
 bot.command('start', async (ctx) => {
   console.log('Start komutu alındı, chat ID:', ctx.chat.id);
-  if (!isBotStarted) {
-    isBotStarted = true;
-    await ctx.reply('Merhaba! Kripto analiz botu hazır. /analiz ile başla veya coin sor (ör. "ADA ne durumda?").');
-  }
+  await ctx.reply('Merhaba! Kripto analiz botu hazır. /analiz ile başla veya coin sor (ör. "ADA ne durumda?").');
 });
 
 bot.command('analiz', async (ctx) => {
   console.log('Analiz komutu alındı, chat ID:', ctx.chat.id);
-  const news = await fetchNews();
-  const messages = await fullAnalysis(news);
-  for (const message of messages) {
-    await ctx.reply(message);
-  }
-  await saveAnalysis(db, { tarih: new Date().toLocaleString('tr-TR'), analiz: messages.join('\n') }).catch(err => console.error('Save analysis error:', err));
-  if (ctx.chat.id == GROUP_ID) {
+  try {
+    const news = await fetchNews();
+    const messages = await fullAnalysis(news);
     for (const message of messages) {
-      await bot.telegram.sendMessage(GROUP_ID, message);
+      await ctx.reply(message);
     }
+    await saveAnalysis(db, { tarih: new Date().toLocaleString('tr-TR'), analiz: messages.join('\n') }).catch(err => console.error('Save analysis error:', err));
+    if (ctx.chat.id == GROUP_ID) {
+      for (const message of messages) {
+        await bot.telegram.sendMessage(GROUP_ID, message);
+      }
+    }
+  } catch (error) {
+    console.error('Analiz command error:', error);
+    await ctx.reply('Analiz sırasında bir hata oluştu, lütfen tekrar deneyin.');
   }
 });
 
@@ -360,14 +371,19 @@ bot.command('alarm_kur', async (ctx) => {
     const coinPair = coin.toUpperCase() + '-USDT';
     const { startPriceWebSocket } = startWebSocket(coinPair, null, async ({ price: currentPrice }) => {
       if (currentPrice <= parseFloat(price) || currentPrice >= parseFloat(price)) {
-        const news = await fetchNews();
-        const analysis = await analyzeCoin(coinPair, null, news, false);
-        let message = `Alarm: ${coin} ${currentPrice.toFixed(2)}'e ${currentPrice <= parseFloat(price) ? 'düştü' : 'çıktı'}!\n`;
-        message += `${coin} Analizi (${new Date().toLocaleString('tr-TR')}):\n`;
-        message += `  Giriş: ${analysis.analyses.giriş.toFixed(2)}, Çıkış: ${analysis.analyses.çıkış.toFixed(2)}\n  Yorum: ${analysis.analyses.yorum}\n`;
-        await ctx.reply(message);
-        if (ctx.chat.id == GROUP_ID) {
-          await bot.telegram.sendMessage(GROUP_ID, message);
+        try {
+          const news = await fetchNews();
+          const analysis = await analyzeCoin(coinPair, null, news, false);
+          let message = `Alarm: ${coin} ${currentPrice.toFixed(2)}'e ${currentPrice <= parseFloat(price) ? 'düştü' : 'çıktı'}!\n`;
+          message += `${coin} Analizi (${new Date().toLocaleString('tr-TR')}):\n`;
+          message += `  Giriş: ${analysis.analyses.giriş.toFixed(2)}, Çıkış: ${analysis.analyses.çıkış.toFixed(2)}\n  Yorum: ${analysis.analyses.yorum}\n`;
+          await ctx.reply(message);
+          if (ctx.chat.id == GROUP_ID) {
+            await bot.telegram.sendMessage(GROUP_ID, message);
+          }
+        } catch (error) {
+          console.error('Alarm error:', error);
+          await ctx.reply(`Alarm: ${coin} ${currentPrice.toFixed(2)}'e ulaştı, ancak analiz alınamadı.`);
         }
       }
     });
@@ -383,34 +399,51 @@ bot.on('text', async (ctx) => {
   console.log('Metin alındı, chat ID:', ctx.chat.id, 'text:', ctx.message.text);
   const text = ctx.message.text.toLowerCase();
   const coin = COINS.find(c => text.includes(c.split('-')[0].toLowerCase()));
-  if (coin) {
-    console.log(`Coin analizi: ${coin}`);
-    const news = await fetchNews();
-    const analysis = await analyzeCoin(coin, null, news, false);
-    let message = `${coin} Analizi (${new Date().toLocaleString('tr-TR')}):\nGiriş: ${analysis.analyses.giriş.toFixed(2)}, Çıkış: ${analysis.analyses.çıkış.toFixed(2)}\nYorum: ${analysis.analyses.yorum}`;
-    await ctx.reply(message);
-    if (ctx.chat.id == GROUP_ID) {
-      await bot.telegram.sendMessage(GROUP_ID, message);
+  try {
+    if (coin) {
+      console.log(`Coin analizi: ${coin}`);
+      const news = await fetchNews();
+      const analysis = await analyzeCoin(coin, null, news, false);
+      let message = `${coin} Analizi (${new Date().toLocaleString('tr-TR')}):\nGiriş: ${analysis.analyses.giriş.toFixed(2)}, Çıkış: ${analysis.analyses.çıkış.toFixed(2)}\nYorum: ${analysis.analyses.yorum}`;
+      await ctx.reply(message);
+      if (ctx.chat.id == GROUP_ID) {
+        await bot.telegram.sendMessage(GROUP_ID, message);
+      }
+      await saveAnalysis(db, { tarih: new Date().toLocaleString('tr-TR'), analiz: JSON.stringify(analysis.analyses) }).catch(err => console.error('Save analysis error:', err));
+    } else {
+      console.log('Genel sohbet, metin:', text);
+      const prompt = `Kullanıcı mesajı: "${text}". Kripto analiz botusun, kısa ve doğal Türkçe yanıt ver. Coin analizi istersen analiz yap, yoksa sohbet et.`;
+      const comment = await rateLimitedCallGrok(prompt);
+      await ctx.reply(comment || 'Üzgünüm, bu konuda yorum yapamadım. Bir coin belirtir misin?');
     }
-    await saveAnalysis(db, { tarih: new Date().toLocaleString('tr-TR'), analiz: JSON.stringify(analysis.analyses) }).catch(err => console.error('Save analysis error:', err));
-  } else {
-    console.log('Genel sohbet, metin:', text);
-    const prompt = `Kullanıcı mesajı: "${text}". Kripto analiz botusun, kısa ve doğal Türkçe yanıt ver. Coin analizi istersen analiz yap, yoksa sohbet et.`;
-    const comment = await rateLimitedCallGrok(prompt);
-    await ctx.reply(comment || 'Üzgünüm, bu konuda yorum yapamadım. Bir coin belirtir misin?');
+  } catch (error) {
+    console.error('Text handler error:', error);
+    await ctx.reply('Bir hata oluştu, lütfen tekrar deneyin.');
   }
 });
 
 // Planlanmış grup analizleri
 schedule.scheduleJob('0 */12 * * *', async () => {
   console.log('Planlanmış grup analizi başlıyor...');
-  const news = await fetchNews();
-  const messages = await fullAnalysis(news);
-  for (const message of messages) {
-    console.log('Planlanmış grup mesajı:', message);
-    await bot.telegram.sendMessage(GROUP_ID, message);
+  try {
+    const news = await fetchNews();
+    const messages = await fullAnalysis(news);
+    for (const message of messages) {
+      console.log('Planlanmış grup mesajı:', message);
+      await bot.telegram.sendMessage(GROUP_ID, message);
+    }
+    await saveAnalysis(db, { tarih: new Date().toLocaleString('tr-TR'), analiz: messages.join('\n') }).catch(err => console.error('Save analysis error:', err));
+  } catch (error) {
+    console.error('Scheduled analysis error:', error);
   }
-  await saveAnalysis(db, { tarih: new Date().toLocaleString('tr-TR'), analiz: messages.join('\n') }).catch(err => console.error('Save analysis error:', err));
+});
+
+// Handle SIGTERM gracefully
+process.on('SIGTERM', () => {
+  console.log('Received SIGTERM, stopping bot...');
+  bot.stop();
+  db.close();
+  process.exit(0);
 });
 
 // Start Bot
