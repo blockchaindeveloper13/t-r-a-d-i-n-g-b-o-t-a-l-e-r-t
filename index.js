@@ -14,6 +14,7 @@ const bot = new Telegraf(process.env.TELEGRAM_TOKEN || '7551795139:AAHJa1du2jRmm
 const parser = new Parser();
 const COINS = ['AAVE-USDT', 'COMP-USDT', 'LTC-USDT', 'XLM-USDT', 'ADA-USDT', 'MKR-USDT', 'BTC-USDT'];
 const GROUP_ID = '-1002869335730'; // @tradingroup95 grup ID'si
+let isBotStarted = false;
 
 // SQLite setup
 const db = new sqlite3.Database('./analiz.db');
@@ -21,18 +22,25 @@ initDB(db);
 
 // Botu polling modunda başlat
 async function startBot() {
+  if (isBotStarted) {
+    console.log('Bot zaten başlatılmış, tekrar başlatılmıyor.');
+    return;
+  }
   try {
+    console.log('Bot başlatılıyor...');
     await bot.launch({
       polling: {
-        interval: 300, // 300ms polling intervali
-        timeout: 30 // 30 saniye timeout
+        interval: 300,
+        timeout: 30
       }
     });
     console.log('Bot polling modunda başlatıldı.');
+    isBotStarted = true;
     await bot.telegram.sendMessage(GROUP_ID, 'Merhaba @tradingroup95! Kripto analiz botu aktif. /analiz ile başlayın veya coin sor (ör. "ADA ne durumda?").');
   } catch (error) {
     console.error('Bot başlatma hatası:', error.message, error.stack);
     console.log('5 saniye sonra tekrar deneniyor...');
+    isBotStarted = false;
     setTimeout(startBot, 5000);
   }
 }
@@ -41,13 +49,10 @@ async function startBot() {
 bot.command('start', async (ctx) => {
   try {
     console.log('Start komutu alındı, chat ID:', ctx?.chat?.id || 'Bilinmiyor', 'user:', ctx?.from?.username || 'Bilinmiyor');
-    await ctx.reply('Merhaba! Kripto analiz botu hazır. /analiz ile başla veya coin sor (ör. "ADA ne durumda?").');
-    if (String(ctx.chat.id) === GROUP_ID) {
-      await bot.telegram.sendMessage(GROUP_ID, 'Bot @tradingroup95 grubunda aktif! /analiz ile kripto analizlerini görün.');
-    }
+    await ctx.reply('Merhaba! Kripto analiz botu hazır. /analiz ile tüm coin analizlerini gör veya bir coin sor (ör. "ADA ne durumda?").');
   } catch (error) {
     console.error('Start komutu hatası:', error.message, error.stack);
-    if (ctx) await ctx.reply('Hata oluştu, lütfen tekrar deneyin.');
+    await ctx.reply('Hata oluştu, lütfen tekrar deneyin.');
   }
 });
 
@@ -62,23 +67,17 @@ bot.command('analiz', async (ctx) => {
         const chunks = message.match(/.{1,2000}/g);
         for (const chunk of chunks) {
           await ctx.reply(chunk);
-          if (String(ctx.chat.id) === GROUP_ID) {
-            await bot.telegram.sendMessage(GROUP_ID, chunk);
-            console.log('Grup mesaj parçası gönderildi:', chunk);
-          }
+          console.log('Mesaj parçası gönderildi:', chunk);
         }
       } else {
         await ctx.reply(message);
-        if (String(ctx.chat.id) === GROUP_ID) {
-          await bot.telegram.sendMessage(GROUP_ID, message);
-          console.log('Grup mesajı gönderildi:', message);
-        }
+        console.log('Mesaj gönderildi:', message);
       }
     }
     await saveAnalysis(db, { tarih: new Date().toLocaleString('tr-TR'), analiz: messages.join('\n') });
   } catch (error) {
     console.error('Analiz hatası:', error.message, error.stack);
-    if (ctx) await ctx.reply('Analiz sırasında hata oluştu. Lütfen tekrar deneyin.');
+    await ctx.reply('Analiz sırasında hata oluştu. Lütfen tekrar deneyin.');
   }
 });
 
@@ -92,7 +91,7 @@ bot.command('alarm_kur', async (ctx) => {
       const { startPriceWebSocket } = startWebSocket(coinPair, null, async ({ price: currentPrice }) => {
         if (currentPrice <= parseFloat(price) || currentPrice >= parseFloat(price)) {
           const news = await fetchNews();
-          const analysis = await analyzeCoin(coinPair, null, news, false); // HTTP Klines
+          const analysis = await analyzeCoin(coinPair, null, news, false);
           const timeframe = '1hour';
           const data = analysis.analyses[timeframe];
           let message = `Alarm: ${coin} ${currentPrice.toFixed(2)}'e ${currentPrice <= parseFloat(price) ? 'düştü' : 'çıktı'}!\n`;
@@ -107,17 +106,11 @@ bot.command('alarm_kur', async (ctx) => {
             const chunks = message.match(/.{1,2000}/g);
             for (const chunk of chunks) {
               await ctx.reply(chunk);
-              if (String(ctx.chat.id) === GROUP_ID) {
-                await bot.telegram.sendMessage(GROUP_ID, chunk);
-                console.log('Alarm mesaj parçası gönderildi:', chunk);
-              }
+              console.log('Alarm mesaj parçası gönderildi:', chunk);
             }
           } else {
             await ctx.reply(message);
-            if (String(ctx.chat.id) === GROUP_ID) {
-              await bot.telegram.sendMessage(GROUP_ID, message);
-              console.log('Alarm mesajı gönderildi:', message);
-            }
+            console.log('Alarm mesajı gönderildi:', message);
           }
         }
       });
@@ -128,41 +121,56 @@ bot.command('alarm_kur', async (ctx) => {
     }
   } catch (error) {
     console.error('Alarm kur hatası:', error.message, error.stack);
-    if (ctx) await ctx.reply('Alarm kurulumunda hata oluştu. Lütfen tekrar deneyin.');
+    await ctx.reply('Alarm kurulumunda hata oluştu. Lütfen tekrar deneyin.');
   }
 });
 
-// Grup mesajlarına yanıt
+// Chatbot özelliği: Herhangi bir metne yanıt
 bot.on('text', async (ctx) => {
   try {
     const text = ctx.message.text.toLowerCase();
+    console.log('Metin alındı, chat ID:', ctx?.chat?.id || 'Bilinmiyor', 'user:', ctx?.from?.username || 'Bilinmiyor', 'text:', text);
     const coin = COINS.find(c => text.includes(c.split('-')[0].toLowerCase()));
-    if (coin && String(ctx.chat.id) === GROUP_ID) {
-      console.log(`Grup metin analizi: ${coin}, chat ID: ${ctx?.chat?.id || 'Bilinmiyor'}, user: ${ctx?.from?.username || 'Bilinmiyor'}`);
+    if (coin) {
+      console.log(`Coin analizi: ${coin}, chat ID: ${ctx?.chat?.id || 'Bilinmiyor'}`);
       const news = await fetchNews();
-      const analysis = await analyzeCoin(coin, null, news, false); // HTTP Klines
+      const analysis = await analyzeCoin(coin, null, news, false);
       for (const [timeframe, data] of Object.entries(analysis.analyses)) {
         let message = `${coin} Analizi (${timeframe}, ${new Date().toLocaleString('tr-TR')}):\n`;
         message += `  Giriş: ${data.giriş.toFixed(2)}, Çıkış: ${data.çıkış.toFixed(2)}\n  Yorum: ${data.yorum}\n`;
-        console.log('Grup metin mesajı:', message);
+        console.log('Gönderilen analiz mesajı:', message);
         if (message.length > 2000) {
           const chunks = message.match(/.{1,2000}/g);
           for (const chunk of chunks) {
             await ctx.reply(chunk);
-            await bot.telegram.sendMessage(GROUP_ID, chunk);
-            console.log('Grup metin mesaj parçası gönderildi:', chunk);
+            console.log('Analiz mesaj parçası gönderildi:', chunk);
           }
         } else {
           await ctx.reply(message);
-          await bot.telegram.sendMessage(GROUP_ID, message);
-          console.log('Grup metin mesajı gönderildi:', message);
+          console.log('Analiz mesajı gönderildi:', message);
         }
       }
       await saveAnalysis(db, { tarih: analysis.tarih, analiz: JSON.stringify(analysis.analyses) });
+    } else {
+      // Genel sohbet için Grok-4 yanıtı
+      console.log('Genel sohbet, metin:', text);
+      const grokResponse = await analyzeCoin(null, text, [], false); // Grok-4 ile serbest metin analizi
+      let message = grokResponse.analyses?.general?.yorum || 'Üzgünüm, bu konuda analiz yapamadım. Bir coin belirtir misiniz (ör. "ADA ne durumda?")';
+      console.log('Genel sohbet yanıtı:', message);
+      if (message.length > 2000) {
+        const chunks = message.match(/.{1,2000}/g);
+        for (const chunk of chunks) {
+          await ctx.reply(chunk);
+          console.log('Sohbet mesaj parçası gönderildi:', chunk);
+        }
+      } else {
+        await ctx.reply(message);
+        console.log('Sohbet mesajı gönderildi:', message);
+      }
     }
   } catch (error) {
-    console.error('Grup analiz hatası:', error.message, error.stack);
-    if (ctx) await ctx.reply('Analiz sırasında hata oluştu. Lütfen tekrar deneyin.');
+    console.error('Metin işleme hatası:', error.message, error.stack);
+    await ctx.reply('Hata oluştu, lütfen tekrar deneyin.');
   }
 });
 
