@@ -8,7 +8,7 @@ const axios = require('axios');
 const WebSocket = require('ws');
 const http = require('http');
 
-// Cache for API responses
+// Cache for API responses and analyses
 const cache = new Map();
 const CACHE_DURATION = 3 * 60 * 1000; // 3 minutes
 const CACHE_CLEAR_INTERVAL = 30 * 1000; // 30 seconds
@@ -51,7 +51,7 @@ async function rateLimitedCallGrok(prompt, retries = 3) {
           messages: [
             {
               role: 'system',
-              content: 'Sen bir kripto para analiz botusun, Grok-4-0709 modelini kullanıyorsun. Kısa vadeli zaman dilimlerini (1min, 5min, 30min, 1hour) inceleyip teknik ve temel analize dayalı kısa, samimi, anlaşılır Türkçe yorum yap (maksimum 300 kelime, kelime sayısını yazma). Güncel fiyat (💰), giriş (📉), kısa vadeli çıkış (4-6 saat, 📈), günlük çıkış (24 saat, 📈), haftalık çıkış (1 hafta, 📈), uzun vadeli çıkış (1-2 hafta, 📈) ve stop-loss (🛑) fiyatını giriş fiyatının altında 1.5 * ATR mesafede belirle. Giriş fiyatını belirlerken fiyatın düşebileceği potansiyel dip seviyelerini (SMA-50, PSAR, Fibonacci %38.2, ATR) analiz et, güncel fiyattan direkt giriş önerme, kâr marjını maksimize et. Temel analiz için haberlerin pozitif/negatif etkisini vurgula. Konuşma geçmişini dikkate al, samimi sohbet et.'
+              content: 'Sen bir kripto para analiz botusun, Grok-4-0709 modelini kullanıyorsun. Kısa vadeli zaman dilimlerini (1min, 5min, 30min, 1hour) inceleyip teknik ve temel analize dayalı kısa, samimi, anlaşılır Türkçe yorum yap (maksimum 300 kelime, kelime sayısını yazma). Güncel fiyat (💰), giriş (📉), kısa vadeli çıkış (4-6 saat, 📈), günlük çıkış (24 saat, 📈), haftalık çıkış (1 hafta, 📈), uzun vadeli çıkış (1-2 hafta, 📈) ve stop-loss (🛑) fiyatını giriş fiyatının altında 1.5 * ATR mesafede belirle. Giriş fiyatını belirlerken fiyatın düşebileceği potansiyel dip seviyelerini (SMA-50, PSAR, Fibonacci %38.2, ATR) analiz et, güncel fiyattan direkt giriş önerme, kâr marjını maksimize et. Kısa vadeli (1sa) ve uzun vadeli (1 hafta) destek/direnç noktaları belirle, her direnç noktası aşılırsa olası fiyat hedeflerini ver. Temel analiz için haberlerin pozitif/negatif etkisini vurgula. Konuşma geçmişini dikkate al, samimi sohbet et.'
             },
             { role: 'user', content: prompt },
           ],
@@ -151,6 +151,27 @@ async function getRecentChatHistory(db, chatId) {
         console.error('Get recent chat history error:', err);
         reject(err);
       } else resolve(rows.map(row => row.message));
+    });
+  });
+}
+
+async function getCachedAnalysis(db, coin) {
+  return new Promise((resolve, reject) => {
+    db.get(`SELECT analiz FROM analizler WHERE coin = ? ORDER BY id DESC LIMIT 1`, [coin], (err, row) => {
+      if (err) {
+        console.error('Get cached analysis error:', err);
+        reject(err);
+      } else if (row) {
+        const analysis = JSON.parse(row.analiz);
+        if (Date.now() - new Date(analysis.tarih).getTime() < CACHE_DURATION) {
+          console.log(`Cached analysis found for ${coin}`);
+          resolve(analysis);
+        } else {
+          resolve(null);
+        }
+      } else {
+        resolve(null);
+      }
     });
   });
 }
@@ -459,6 +480,12 @@ function generateFallbackComment(indicatorsByTimeframe, btcStatus, currentPrice,
 }
 
 async function analyzeCoin(coin, btcData = null, news = [], chatHistory = []) {
+  // Önce önbellekteki analizi kontrol et
+  const cachedAnalysis = await getCachedAnalysis(db, coin);
+  if (cachedAnalysis) {
+    return { coin, tarih: cachedAnalysis.tarih, analyses: cachedAnalysis };
+  }
+
   let result = { coin, tarih: new Date().toLocaleString('tr-TR'), analyses: {} };
   let indicatorsByTimeframe = {};
 
@@ -495,7 +522,8 @@ async function analyzeCoin(coin, btcData = null, news = [], chatHistory = []) {
       - Günlük (24 saat) hedef,
       - Haftalık (1 hafta) hedef,
       - Uzun vadeli (1-2 hafta) hedef ver.
-    Stop-loss (🛑) fiyatını giriş fiyatının altında, 1.5 * ATR mesafede belirle. 
+    Stop-loss (🛑) fiyatını giriş fiyatının altında, 1.5 * ATR mesafede belirle.
+    Kısa vadeli (1sa) ve uzun vadeli (1 hafta) destek/direnç noktaları belirle. Her direnç noktası aşılırsa olası fiyat hedeflerini ver.
     Kısa, samimi Türkçe yorum (maksimum 300 kelime, kelime sayısını yazma). Haberlerin pozitif/negatif etkisini vurgula.`;
   let comment = await rateLimitedCallGrok(prompt);
   if (!comment) {
@@ -508,12 +536,26 @@ async function analyzeCoin(coin, btcData = null, news = [], chatHistory = []) {
   let weeklyTp = currentPrice ? currentPrice * 1.2 : 0;
   let longTp = currentPrice ? currentPrice * 1.3 : 0;
   let stopLoss = dip - 1.5 * atr;
+  let shortTermSupport = currentPrice ? currentPrice * 0.98 : 0;
+  let shortTermResistance = currentPrice ? currentPrice * 1.03 : 0;
+  let longTermSupport = currentPrice ? currentPrice * 0.95 : 0;
+  let longTermResistance = currentPrice ? currentPrice * 1.15 : 0;
+  let shortTermResistanceTarget = shortTermResistance * 1.1;
+  let longTermResistanceTarget = longTermResistance * 1.2;
+
   const priceMatch = comment.match(/📉 (\d+\.?\d*)/);
   const shortTpMatch = comment.match(/Kısa vadeli 📈 (\d+\.?\d*)/);
   const dailyTpMatch = comment.match(/Günlük 📈 (\d+\.?\d*)/);
   const weeklyTpMatch = comment.match(/Haftalık 📈 (\d+\.?\d*)/);
   const longTpMatch = comment.match(/Uzun vadeli 📈 (\d+\.?\d*)/);
   const stopLossMatch = comment.match(/🛑 (\d+\.?\d*)/);
+  const shortTermSupportMatch = comment.match(/Kısa vadeli destek: (\d+\.?\d*)/);
+  const shortTermResistanceMatch = comment.match(/Kısa vadeli direnç: (\d+\.?\d*)/);
+  const longTermSupportMatch = comment.match(/Uzun vadeli destek: (\d+\.?\d*)/);
+  const longTermResistanceMatch = comment.match(/Uzun vadeli direnç: (\d+\.?\d*)/);
+  const shortTermResistanceTargetMatch = comment.match(/Kısa vadeli direnç aşılırsa hedef: (\d+\.?\d*)/);
+  const longTermResistanceTargetMatch = comment.match(/Uzun vadeli direnç aşılırsa hedef: (\d+\.?\d*)/);
+
   if (priceMatch) {
     dip = parseFloat(priceMatch[1]);
     shortTp = shortTpMatch ? parseFloat(shortTpMatch[1]) : dip * 1.05;
@@ -521,6 +563,12 @@ async function analyzeCoin(coin, btcData = null, news = [], chatHistory = []) {
     weeklyTp = weeklyTpMatch ? parseFloat(weeklyTpMatch[1]) : dip * 1.2;
     longTp = longTpMatch ? parseFloat(longTpMatch[1]) : dip * 1.3;
     stopLoss = stopLossMatch ? parseFloat(stopLossMatch[1]) : dip - 1.5 * atr;
+    shortTermSupport = shortTermSupportMatch ? parseFloat(shortTermSupportMatch[1]) : dip * 0.98;
+    shortTermResistance = shortTermResistanceMatch ? parseFloat(shortTermResistanceMatch[1]) : dip * 1.03;
+    longTermSupport = longTermSupportMatch ? parseFloat(longTermSupportMatch[1]) : dip * 0.95;
+    longTermResistance = longTermResistanceMatch ? parseFloat(longTermResistanceMatch[1]) : dip * 1.15;
+    shortTermResistanceTarget = shortTermResistanceTargetMatch ? parseFloat(shortTermResistanceTargetMatch[1]) : shortTermResistance * 1.1;
+    longTermResistanceTarget = longTermResistanceTargetMatch ? parseFloat(longTermResistanceTargetMatch[1]) : longTermResistance * 1.2;
   }
 
   result.analyses = {
@@ -530,10 +578,19 @@ async function analyzeCoin(coin, btcData = null, news = [], chatHistory = []) {
     weeklyÇıkış: weeklyTp,
     longTermÇıkış: longTp,
     stopLoss,
+    shortTermSupport,
+    shortTermResistance,
+    longTermSupport,
+    longTermResistance,
+    shortTermResistanceTarget,
+    longTermResistanceTarget,
     currentPrice,
     yorum: comment,
     indicators: indicatorsByTimeframe,
   };
+
+  // Analizi veritabanına kaydet
+  await saveAnalysis(db, { tarih: result.tarih, coin, analiz: JSON.stringify(result.analyses) });
   return result;
 }
 
@@ -550,6 +607,10 @@ async function fullAnalysis(news, chatHistory) {
     message += `  Haftalık Çıkış (1 hafta): 📈 ${analysis.analyses.weeklyÇıkış.toFixed(2)}\n`;
     message += `  Uzun Vadeli Çıkış (1-2 hafta): 📈 ${analysis.analyses.longTermÇıkış.toFixed(2)}\n`;
     message += `  Stop-Loss: 🛑 ${analysis.analyses.stopLoss.toFixed(2)}\n`;
+    message += `  Kısa Vadeli Destek (1sa): ${analysis.analyses.shortTermSupport.toFixed(2)}\n`;
+    message += `  Kısa Vadeli Direnç (1sa): ${analysis.analyses.shortTermResistance.toFixed(2)} (Aşılırsa Hedef: ${analysis.analyses.shortTermResistanceTarget.toFixed(2)})\n`;
+    message += `  Uzun Vadeli Destek (1hf): ${analysis.analyses.longTermSupport.toFixed(2)}\n`;
+    message += `  Uzun Vadeli Direnç (1hf): ${analysis.analyses.longTermResistance.toFixed(2)} (Aşılırsa Hedef: ${analysis.analyses.longTermResistanceTarget.toFixed(2)})\n`;
     message += `  Yorum: ${analysis.analyses.yorum}\n`;
     const negative = news.some(n => n.toLowerCase().includes('düşüş') || n.toLowerCase().includes('hack'));
     if (negative && coin.includes('BTC')) {
@@ -579,8 +640,17 @@ bot.command(/analiz(?:@traderbot95_bot)?/, async (ctx) => {
     const news = await fetchNews();
     const chatHistory = await getRecentChatHistory(db, ctx.chat.id.toString());
     await ctx.reply(`${coin.split('-')[0]}'yı analiz ediyorum, biraz bekle! 😎`);
-    const analysis = await analyzeCoin(coin, null, news, chatHistory);
-    let message = `${coin} Analizi (${new Date().toLocaleString('tr-TR')}):\n`;
+    
+    // Önbellekteki analizi kontrol et
+    const cachedAnalysis = await getCachedAnalysis(db, coin);
+    let analysis;
+    if (cachedAnalysis) {
+      analysis = { coin, tarih: cachedAnalysis.tarih, analyses: cachedAnalysis };
+    } else {
+      analysis = await analyzeCoin(coin, null, news, chatHistory);
+    }
+
+    let message = `${coin} Analizi (${new Date(analysis.tarih).toLocaleString('tr-TR')}):\n`;
     message += `  Güncel Fiyat: 💰 ${analysis.analyses.currentPrice ? analysis.analyses.currentPrice.toFixed(2) : 'Bilinmiyor'}\n`;
     message += `  Giriş: 📉 ${analysis.analyses.giriş.toFixed(2)}\n`;
     message += `  Kısa Vadeli Çıkış (4-6 saat): 📈 ${analysis.analyses.shortTermÇıkış.toFixed(2)}\n`;
@@ -588,12 +658,18 @@ bot.command(/analiz(?:@traderbot95_bot)?/, async (ctx) => {
     message += `  Haftalık Çıkış (1 hafta): 📈 ${analysis.analyses.weeklyÇıkış.toFixed(2)}\n`;
     message += `  Uzun Vadeli Çıkış (1-2 hafta): 📈 ${analysis.analyses.longTermÇıkış.toFixed(2)}\n`;
     message += `  Stop-Loss: 🛑 ${analysis.analyses.stopLoss.toFixed(2)}\n`;
+    message += `  Kısa Vadeli Destek (1sa): ${analysis.analyses.shortTermSupport.toFixed(2)}\n`;
+    message += `  Kısa Vadeli Direnç (1sa): ${analysis.analyses.shortTermResistance.toFixed(2)} (Aşılırsa Hedef: ${analysis.analyses.shortTermResistanceTarget.toFixed(2)})\n`;
+    message += `  Uzun Vadeli Destek (1hf): ${analysis.analyses.longTermSupport.toFixed(2)}\n`;
+    message += `  Uzun Vadeli Direnç (1hf): ${analysis.analyses.longTermResistance.toFixed(2)} (Aşılırsa Hedef: ${analysis.analyses.longTermResistanceTarget.toFixed(2)})\n`;
     message += `  Yorum: ${analysis.analyses.yorum}\n`;
     await ctx.reply(message);
     if (ctx.chat.id.toString() === GROUP_ID) {
       await bot.telegram.sendMessage(GROUP_ID, message);
     }
-    await saveAnalysis(db, { tarih: new Date().toLocaleString('tr-TR'), coin, analiz: JSON.stringify(analysis.analyses) });
+    if (!cachedAnalysis) {
+      await saveAnalysis(db, { tarih: analysis.tarih, coin, analiz: JSON.stringify(analysis.analyses) });
+    }
     await saveChatHistory(db, ctx.chat.id.toString(), ctx.message.text);
   } catch (error) {
     console.error('Analiz command error:', error);
@@ -623,9 +699,15 @@ bot.command('alarm_kur', async (ctx) => {
         try {
           const news = await fetchNews();
           const chatHistory = await getRecentChatHistory(db, ctx.chat.id.toString());
-          const analysis = await analyzeCoin(coinPair, null, news, chatHistory);
+          const cachedAnalysis = await getCachedAnalysis(db, coinPair);
+          let analysis;
+          if (cachedAnalysis) {
+            analysis = { coin: coinPair, tarih: cachedAnalysis.tarih, analyses: cachedAnalysis };
+          } else {
+            analysis = await analyzeCoin(coinPair, null, news, chatHistory);
+          }
           let message = `Alarm: ${coin} ${currentPrice.toFixed(2)}'e ${currentPrice <= targetPrice ? 'düştü' : 'çıktı'}! 🚨\n`;
-          message += `${coin} Analizi (${new Date().toLocaleString('tr-TR')}):\n`;
+          message += `${coin} Analizi (${new Date(analysis.tarih).toLocaleString('tr-TR')}):\n`;
           message += `  Güncel Fiyat: 💰 ${analysis.analyses.currentPrice ? analysis.analyses.currentPrice.toFixed(2) : 'Bilinmiyor'}\n`;
           message += `  Giriş: 📉 ${analysis.analyses.giriş.toFixed(2)}\n`;
           message += `  Kısa Vadeli Çıkış (4-6 saat): 📈 ${analysis.analyses.shortTermÇıkış.toFixed(2)}\n`;
@@ -633,6 +715,10 @@ bot.command('alarm_kur', async (ctx) => {
           message += `  Haftalık Çıkış (1 hafta): 📈 ${analysis.analyses.weeklyÇıkış.toFixed(2)}\n`;
           message += `  Uzun Vadeli Çıkış (1-2 hafta): 📈 ${analysis.analyses.longTermÇıkış.toFixed(2)}\n`;
           message += `  Stop-Loss: 🛑 ${analysis.analyses.stopLoss.toFixed(2)}\n`;
+          message += `  Kısa Vadeli Destek (1sa): ${analysis.analyses.shortTermSupport.toFixed(2)}\n`;
+          message += `  Kısa Vadeli Direnç (1sa): ${analysis.analyses.shortTermResistance.toFixed(2)} (Aşılırsa Hedef: ${analysis.analyses.shortTermResistanceTarget.toFixed(2)})\n`;
+          message += `  Uzun Vadeli Destek (1hf): ${analysis.analyses.longTermSupport.toFixed(2)}\n`;
+          message += `  Uzun Vadeli Direnç (1hf): ${analysis.analyses.longTermResistance.toFixed(2)} (Aşılırsa Hedef: ${analysis.analyses.longTermResistanceTarget.toFixed(2)})\n`;
           message += `  Yorum: ${analysis.analyses.yorum}\n`;
           await ctx.reply(message);
           if (ctx.chat.id.toString() === GROUP_ID) {
@@ -640,6 +726,9 @@ bot.command('alarm_kur', async (ctx) => {
           }
           await bot.telegram.sendMessage('1616739367', message);
           priceAlarms.delete(`${coinPair}-${ctx.chat.id}`);
+          if (!cachedAnalysis) {
+            await saveAnalysis(db, { tarih: analysis.tarih, coin: coinPair, analiz: JSON.stringify(analysis.analyses) });
+          }
         } catch (error) {
           console.error('Alarm error:', error);
           await ctx.reply(`Alarm: ${coin} ${currentPrice.toFixed(2)}'e ulaştı, ancak analiz alınamadı. 😓`);
@@ -679,12 +768,34 @@ bot.on('text', async (ctx) => {
   try {
     const chatHistory = await getRecentChatHistory(db, ctx.chat.id.toString());
     await saveChatHistory(db, ctx.chat.id.toString(), ctx.message.text);
+
+    // Sadece fiyat sorulmuşsa
+    if (text.match(/^(.*\s*)?fiyat(\s*.*)?$/)) {
+      if (coin) {
+        const price = await getCurrentPrice(coin);
+        await ctx.reply(`${coin.split('-')[0]} Güncel Fiyat: 💰 ${price ? price.toFixed(2) : 'Bilinmiyor'} USDT`);
+        return;
+      } else {
+        await ctx.reply('Lütfen bir coin belirt (ör. "ADA fiyatı"). 😊');
+        return;
+      }
+    }
+
     if (coin) {
       console.log(`Coin analizi: ${coin}`);
       await ctx.reply(`${coin.split('-')[0]}'yı hemen kontrol ediyorum! 😎`);
       const news = await fetchNews();
-      const analysis = await analyzeCoin(coin, null, news, chatHistory);
-      let message = `${coin} Analizi (${new Date().toLocaleString('tr-TR')}):\n`;
+      
+      // Önbellekteki analizi kontrol et
+      const cachedAnalysis = await getCachedAnalysis(db, coin);
+      let analysis;
+      if (cachedAnalysis) {
+        analysis = { coin, tarih: cachedAnalysis.tarih, analyses: cachedAnalysis };
+      } else {
+        analysis = await analyzeCoin(coin, null, news, chatHistory);
+      }
+
+      let message = `${coin} Analizi (${new Date(analysis.tarih).toLocaleString('tr-TR')}):\n`;
       message += `  Güncel Fiyat: 💰 ${analysis.analyses.currentPrice ? analysis.analyses.currentPrice.toFixed(2) : 'Bilinmiyor'}\n`;
       message += `  Giriş: 📉 ${analysis.analyses.giriş.toFixed(2)}\n`;
       message += `  Kısa Vadeli Çıkış (4-6 saat): 📈 ${analysis.analyses.shortTermÇıkış.toFixed(2)}\n`;
@@ -692,12 +803,18 @@ bot.on('text', async (ctx) => {
       message += `  Haftalık Çıkış (1 hafta): 📈 ${analysis.analyses.weeklyÇıkış.toFixed(2)}\n`;
       message += `  Uzun Vadeli Çıkış (1-2 hafta): 📈 ${analysis.analyses.longTermÇıkış.toFixed(2)}\n`;
       message += `  Stop-Loss: 🛑 ${analysis.analyses.stopLoss.toFixed(2)}\n`;
+      message += `  Kısa Vadeli Destek (1sa): ${analysis.analyses.shortTermSupport.toFixed(2)}\n`;
+      message += `  Kısa Vadeli Direnç (1sa): ${analysis.analyses.shortTermResistance.toFixed(2)} (Aşılırsa Hedef: ${analysis.analyses.shortTermResistanceTarget.toFixed(2)})\n`;
+      message += `  Uzun Vadeli Destek (1hf): ${analysis.analyses.longTermSupport.toFixed(2)}\n`;
+      message += `  Uzun Vadeli Direnç (1hf): ${analysis.analyses.longTermResistance.toFixed(2)} (Aşılırsa Hedef: ${analysis.analyses.longTermResistanceTarget.toFixed(2)})\n`;
       message += `  Yorum: ${analysis.analyses.yorum}`;
       await ctx.reply(message);
       if (ctx.chat.id.toString() === GROUP_ID) {
         await bot.telegram.sendMessage(GROUP_ID, message);
       }
-      await saveAnalysis(db, { tarih: new Date().toLocaleString('tr-TR'), coin, analiz: JSON.stringify(analysis.analyses) });
+      if (!cachedAnalysis) {
+        await saveAnalysis(db, { tarih: analysis.tarih, coin, analiz: JSON.stringify(analysis.analyses) });
+      }
     } else if (text.includes('grok') && (text.includes('versiyon') || text.includes('model'))) {
       await ctx.reply('Haha, kanka, ben Grok-4-0709 modelini kullanıyorum, xAI’nin en son harikası! 😎 Kripto analizleri için tam gaz buradayım. Başka neyi merak ediyorsun, XLM mi, AAVE mi, yoksa başka bi’ coin mi? 🚀');
     } else {
