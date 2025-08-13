@@ -48,6 +48,16 @@ function calculateIndicators(data) {
   };
 }
 
+function generateFallbackComment(indicators, btcStatus, dip, tp, timeframe, coin) {
+  let comment = `BTC durumu: ${btcStatus}. `;
+  if (indicators.RSI < 30) comment += `${coin} ${timeframe} zaman diliminde aşırı satım bölgesinde, alım fırsatı olabilir. `;
+  else if (indicators.RSI > 70) comment += `${coin} ${timeframe} zaman diliminde aşırı alım bölgesinde, satış düşünülebilir. `;
+  else comment += `${coin} ${timeframe} zaman diliminde nötr bölgede. `;
+  comment += `RSI: ${indicators.RSI.toFixed(2)}, MACD: ${indicators.MACD.toFixed(2)}, Hacim değişimi: ${indicators.volumeChange.toFixed(2)}%. `;
+  comment += `Tahmini giriş: ${dip.toFixed(2)}, Tahmini çıkış: ${tp.toFixed(2)}.`;
+  return comment;
+}
+
 async function callGrok(prompt) {
   try {
     const response = await axios.post(
@@ -57,7 +67,7 @@ async function callGrok(prompt) {
           { role: 'system', content: 'Sen bir kripto para analiz botusun. Teknik indikatörlere ve Bitcoin durumuna dayalı doğal, Türkçe yorumlar yap.' },
           { role: 'user', content: prompt },
         ],
-        model: 'grok-4-latest',
+        model: 'grok-4-0709', // Model adı güncellendi
         stream: false,
         temperature: 0.7,
       },
@@ -68,10 +78,11 @@ async function callGrok(prompt) {
         },
       }
     );
+    console.log('Grok API response:', response.data); // Hata ayıklama için log
     return response.data.choices[0].message.content.trim();
   } catch (error) {
-    console.error('Grok API error:', error.message);
-    return `Yorum oluşturulamadı: ${error.message}`;
+    console.error('Grok API error:', error.response?.data || error.message);
+    return null; // Hata durumunda null dön, fallback kullanacağız
   }
 }
 
@@ -97,7 +108,10 @@ async function analyzeCoin(coin, btcData = null, news = []) {
       BTC durumu: ${btcStatus}, Haber durumu: ${negativeNews ? 'Olumsuz' : 'Nötr'}. 
       Giriş: ${dip.toFixed(2)}, Çıkış: ${tp.toFixed(2)}. 
       Türkçe, doğal ve ayrıntılı bir analiz yorumu yap.`;
-    const comment = await callGrok(prompt);
+    let comment = await callGrok(prompt);
+    if (!comment) {
+      comment = generateFallbackComment(indicators, btcStatus, dip, tp, timeframe, coin);
+    }
 
     result.analyses[timeframe] = { giriş: dip, çıkış: tp, yorum: comment, indicators };
   }
@@ -109,19 +123,15 @@ async function fullAnalysis(news) {
   const messages = [];
   for (const coin of COINS) {
     const analysis = await analyzeCoin(coin, btcData, news);
-    let message = `${coin} Analizi (${new Date().toLocaleString('tr-TR')}):\n`;
     for (const [timeframe, data] of Object.entries(analysis.analyses)) {
-      message += `  ${timeframe}: Giriş: ${data.giriş.toFixed(2)}, Çıkış: ${data.çıkış.toFixed(2)}\n  Yorum: ${data.yorum}\n\n`;
-      if (message.length > 3500) {
-        messages.push(message);
-        message = '';
+      let message = `${coin} Analizi (${timeframe}, ${new Date().toLocaleString('tr-TR')}):\n`;
+      message += `  Giriş: ${data.giriş.toFixed(2)}, Çıkış: ${data.çıkış.toFixed(2)}\n  Yorum: ${data.yorum}\n`;
+      const negative = news.some(n => n.toLowerCase().includes('düşüş') || n.toLowerCase().includes('hack'));
+      if (negative && coin.includes('BTC') && timeframe === '1hour') {
+        message += `  Alarm: Bitcoin düşüyor, dikkat! Tahmini dip: ${data.giriş.toFixed(2)}.\n`;
       }
+      messages.push(message);
     }
-    const negative = news.some(n => n.toLowerCase().includes('düşüş') || n.toLowerCase().includes('hack'));
-    if (negative && coin.includes('BTC')) {
-      message += `  Alarm: Bitcoin düşüyor, dikkat! Tahmini dip: ${analysis.analyses['1hour']?.giriş.toFixed(2)}.\n`;
-    }
-    if (message) messages.push(message);
   }
   return messages;
 }
