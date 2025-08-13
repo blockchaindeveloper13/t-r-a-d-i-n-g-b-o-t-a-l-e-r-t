@@ -5,7 +5,7 @@ const sqlite3 = require('sqlite3').verbose();
 const { initDB, saveAnalysis, getRecentAnalyses } = require('./db');
 const { fetchNews } = require('./news');
 const { startWebSocket } = require('./websocket');
-const { fullAnalysis } = require('./analysis');
+const { analyzeCoin, fullAnalysis } = require('./analysis');
 
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN);
 const parser = new Parser();
@@ -26,7 +26,7 @@ bot.command('analiz', async (ctx) => {
     const messages = await fullAnalysis(news);
     for (const message of messages) {
       if (message.length > 4000) {
-        const chunks = message.match(/.{1,4000}/g); // 4000 karakterlik parçalara böl
+        const chunks = message.match(/.{1,4000}/g);
         for (const chunk of chunks) {
           await ctx.reply(chunk);
         }
@@ -49,13 +49,29 @@ bot.command('alarm_kur', async (ctx) => {
   const args = ctx.message.text.split(' ').slice(1);
   if (args.length === 2) {
     const [coin, price] = args;
-    startWebSocket(coin.toUpperCase() + '-USDT', parseFloat(price), async (currentPrice) => {
-      if (currentPrice <= price) {
-        await ctx.reply(`Alarm: ${coin} ${currentPrice.toFixed(2)}'e düştü!`);
-      } else if (currentPrice >= price) {
-        await ctx.reply(`Alarm: ${coin} ${currentPrice.toFixed(2)}'e çıktı!`);
+    const coinPair = coin.toUpperCase() + '-USDT';
+    const { startPriceWebSocket } = startWebSocket(coinPair, null, async ({ price: currentPrice }) => {
+      if (currentPrice <= parseFloat(price) || currentPrice >= parseFloat(price)) {
+        const news = await fetchNews();
+        const analysis = await analyzeCoin(coinPair, null, news, true); // WebSocket Klines
+        const timeframe = '1hour';
+        const data = analysis.analyses[timeframe];
+        let message = `Alarm: ${coin} ${currentPrice.toFixed(2)}'e ${currentPrice <= parseFloat(price) ? 'düştü' : 'çıktı'}!\n`;
+        if (data) {
+          message += `${coin} Analizi (${timeframe}, ${new Date().toLocaleString('tr-TR')}):\n`;
+          message += `  Giriş: ${data.giriş.toFixed(2)}, Çıkış: ${data.çıkış.toFixed(2)}\n  Yorum: ${data.yorum}\n`;
+        }
+        if (message.length > 4000) {
+          const chunks = message.match(/.{1,4000}/g);
+          for (const chunk of chunks) {
+            await ctx.reply(chunk);
+          }
+        } else {
+          await ctx.reply(message);
+        }
       }
     });
+    startPriceWebSocket(coinPair, parseFloat(price), () => {});
     await ctx.reply(`${coin} için ${price} alarmı kuruldu.`);
   } else {
     await ctx.reply('Kullanım: /alarm_kur coin fiyat');
@@ -69,17 +85,20 @@ bot.on('text', async (ctx) => {
   if (coin) {
     try {
       const news = await fetchNews();
-      const analysis = await require('./analysis').analyzeCoin(coin, null, news);
-      let message = `${coin} Analizi (${new Date().toLocaleString('tr-TR')}):\n`;
+      const analysis = await analyzeCoin(coin, null, news, false); // HTTP Klines
       for (const [timeframe, data] of Object.entries(analysis.analyses)) {
-        message += `  ${timeframe}: Giriş: ${data.giriş.toFixed(2)}, Çıkış: ${data.çıkış.toFixed(2)}\n  Yorum: ${data.yorum}\n\n`;
-        if (message.length > 3500) {
+        let message = `${coin} Analizi (${timeframe}, ${new Date().toLocaleString('tr-TR')}):\n`;
+        message += `  Giriş: ${data.giriş.toFixed(2)}, Çıkış: ${data.çıkış.toFixed(2)}\n  Yorum: ${data.yorum}\n`;
+        if (message.length > 4000) {
+          const chunks = message.match(/.{1,4000}/g);
+          for (const chunk of chunks) {
+            await ctx.reply(chunk);
+          }
+        } else {
           await ctx.reply(message);
-          message = '';
         }
       }
-      if (message) await ctx.reply(message);
-      await saveAnalysis(db, { tarih: analysis.tarih, analiz: message });
+      await saveAnalysis(db, { tarih: analysis.tarih, analiz: JSON.stringify(analysis.analyses) });
     } catch (error) {
       console.error('Özel analiz error:', error);
       await ctx.reply('Analiz sırasında bir hata oluştu. Lütfen tekrar deneyin.');
