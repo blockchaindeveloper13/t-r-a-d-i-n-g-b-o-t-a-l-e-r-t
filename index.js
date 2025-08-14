@@ -425,7 +425,7 @@ async function fetchHttpKlines(coin, timeframe, startAt = 0, endAt = 0) {
         close: parseFloat(close),
         volume: parseFloat(volume),
       }))
-      .filter(d => d.low > 0 && d.high > 0 && d.low < d.high && d.close > 0);
+      .filter(d => d.low > 0 && d.high > 0 && d.close > 0); // Filtre gevşetildi
     if (data.length === 0) throw new Error('No valid data after filtering');
     cache.set(cacheKey, { data, timestamp: Date.now() });
     return data;
@@ -637,21 +637,46 @@ async function fullAnalysis(news, chatHistory) {
   return messages;
 }
 
-// Quick Status
+// Quick Status (Updated)
 async function getQuickStatus(coin) {
   try {
     const currentPrice = await getCurrentPrice(coin);
-    const klines = await fetchHttpKlines(coin, '5min', Math.floor(Date.now() / 1000) - 5 * 60, Math.floor(Date.now() / 1000));
-    if (!klines || klines.length < 2) {
-      return `Hızlı Durum: ${coin.split('-')[0]} 💰 ${currentPrice ? currentPrice.toFixed(2) : 'Bilinmiyor'} USDT. Veri eksik, trend hesaplanamadı. 😓`;
+    if (!currentPrice) {
+      return `Hızlı Durum: ${coin.split('-')[0]} 💰 Bilinmiyor. Fiyat alınamadı, KuCoin veya CoinMarketCap API’ye bak! 😓`;
     }
+
+    // KuCoin 5 dakikalık kline verisi
+    const endAt = Math.floor(Date.now() / 1000);
+    const startAt = endAt - 10 * 60; // 10 dakika genişletildi
+    let klines = await fetchHttpKlines(coin, '5min', startAt, endAt);
+
+    if (!klines || klines.length < 2) {
+      console.log(`KuCoin kline verisi eksik: ${coin}, CoinGecko deneniyor`);
+      // CoinGecko yedek trend tahmini
+      try {
+        const coinId = coin.split('-')[0].toLowerCase();
+        const response = await axios.get(`https://api.coingecko.com/api/v3/coins/${coinId}/market_chart?vs_currency=usd&days=0.006944`); // 10 dakika
+        const prices = response.data.prices;
+        if (prices.length < 2) {
+          return `Hızlı Durum: ${coin.split('-')[0]} 💰 ${currentPrice.toFixed(2)} USDT. Trend verisi eksik, API’yi kontrol et! 😓`;
+        }
+        const lastPrice = prices[prices.length - 1][1];
+        const prevPrice = prices[prices.length - 2][1];
+        const trend = lastPrice > prevPrice ? 'Yükselişte 📈' : lastPrice < prevPrice ? 'Düşüşte 📉' : 'Nötr ➡️';
+        return `Hızlı Durum: ${coin.split('-')[0]} 💰 ${currentPrice.toFixed(2)} USDT, Son 5dk: ${trend} (CoinGecko)`;
+      } catch (error) {
+        console.error(`CoinGecko trend hatası: ${coin}`, error.message);
+        return `Hızlı Durum: ${coin.split('-')[0]} 💰 ${currentPrice.toFixed(2)} USDT. Trend verisi alınamadı, KuCoin veya CoinGecko API’yi kontrol et! 😓`;
+      }
+    }
+
     const lastClose = klines[klines.length - 1].close;
     const prevClose = klines[klines.length - 2].close;
     const trend = lastClose > prevClose ? 'Yükselişte 📈' : lastClose < prevClose ? 'Düşüşte 📉' : 'Nötr ➡️';
-    return `Hızlı Durum: ${coin.split('-')[0]} 💰 ${currentPrice ? currentPrice.toFixed(2) : 'Bilinmiyor'} USDT, Son 5dk: ${trend}`;
+    return `Hızlı Durum: ${coin.split('-')[0]} 💰 ${currentPrice.toFixed(2)} USDT, Son 5dk: ${trend}`;
   } catch (error) {
     console.error(`Quick status error for ${coin}:`, error.message);
-    return `Hızlı Durum: ${coin.split('-')[0]} için veri alınamadı. 😓`;
+    return `Hızlı Durum: ${coin.split('-')[0]} için veri alınamadı. API’yi kontrol et! 😓`;
   }
 }
 
