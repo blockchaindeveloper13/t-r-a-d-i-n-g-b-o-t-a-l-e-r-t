@@ -338,11 +338,28 @@ async function getCurrentPrice(coin) {
   return price;
 }
 
-async function startWebSocket(coin, targetPrice, callback) {
+// Updated: WebSocket for price alarms
+async function startWebSocket(coin, targetPrice, chatId, callback) {
   const token = await getWebSocketToken();
   if (!token) {
-    console.error('WebSocket token alınamadı, fiyat takibi devam edecek.');
-    return { startPriceWebSocket: () => {}, fetchKlines: async () => [] };
+    console.error('WebSocket token alınamadı, HTTP ile fiyat takibi deneniyor.');
+    // Yedek HTTP fiyat kontrolü
+    try {
+      const price = await getCurrentPrice(coin);
+      if (price && Math.abs(price - targetPrice) <= 0.01 * targetPrice) {
+        callback({ price });
+      }
+      return {
+        startPriceWebSocket: () => {},
+        stop: () => {}
+      };
+    } catch (error) {
+      console.error('HTTP fiyat kontrolü hatası:', error.message);
+      return {
+        startPriceWebSocket: () => {},
+        stop: () => {}
+      };
+    }
   }
 
   const ws = new WebSocket(`wss://ws-api-spot.kucoin.com?token=${token}&connectId=${Date.now()}`);
@@ -368,7 +385,8 @@ async function startWebSocket(coin, targetPrice, callback) {
     try {
       const msg = JSON.parse(data);
       if (msg.type === 'message' && msg.topic.includes('/market/ticker')) {
-        callback({ price: parseFloat(msg.data.price) });
+        const price = parseFloat(msg.data.price);
+        callback({ price });
       }
       if (msg.type === 'pong') ws.isAlive = true;
     } catch (error) {
@@ -381,16 +399,17 @@ async function startWebSocket(coin, targetPrice, callback) {
   });
 
   ws.on('close', () => {
-    console.log('WebSocket closed, reconnecting...');
+    console.log(`WebSocket closed for ${coin}, reconnecting...`);
     clearInterval(pingInterval);
-    setTimeout(() => startWebSocket(coin, targetPrice, callback), 5000);
+    setTimeout(() => startWebSocket(coin, targetPrice, chatId, callback), 5000);
   });
 
   return {
-    startPriceWebSocket: (coin, targetPrice, priceCallback) => {
-      callback({ price: targetPrice });
-    },
-    fetchKlines: async () => [],
+    startPriceWebSocket: () => {},
+    stop: () => {
+      ws.close();
+      clearInterval(pingInterval);
+    }
   };
 }
 
@@ -678,13 +697,14 @@ async function getQuickStatus(coin) {
   }
 }
 
-// Inline Buttons
+// Updated: Inline Buttons
 function getCoinButtons() {
   return Markup.inlineKeyboard(
     COINS.map(coin => [
       Markup.button.callback(coin.split('-')[0], `analyze_${coin}`),
       Markup.button.callback(`Durum (${coin.split('-')[0]})`, `status_${coin}`)
     ]).concat([
+      [Markup.button.callback('Alarm Kur', 'alarm_menu')],
       [Markup.button.callback('Bildirimleri Durdur', 'alarm_stop')]
     ]), { columns: 2 }
   );
@@ -698,184 +718,11 @@ function getAlarmButtons() {
   );
 }
 
-// Chatbot Text Handler
-bot.on('text', async (ctx) => {
-  const message = ctx.message.text.trim().toLowerCase();
-  console.log(`Metin mesajı alındı: ${message}, chat ID: ${ctx.chat.id}`);
-  await saveChatHistory(db, ctx.chat.id.toString(), message);
-
-  // Komutları kontrol et (zaten işleniyor, burada yoksay)
-  if (message.startsWith('/')) {
-    return;
-  }
-
-  // Coin tespiti
-  const coinMap = {
-    'aave': 'AAVE-USDT',
-    'comp': 'COMP-USDT',
-    'ltc': 'LTC-USDT',
-    'xlm': 'XLM-USDT',
-    'ada': 'ADA-USDT',
-    'mkr': 'MKR-USDT',
-    'btc': 'BTC-USDT',
-    'eth': 'ETH-USDT',
-    'bitcoin': 'BTC-USDT',
-    'ethereum': 'ETH-USDT'
-  };
-  let selectedCoin = null;
-  for (const [key, coin] of Object.entries(coinMap)) {
-    if (message.includes(key)) {
-      selectedCoin = coin;
-      break;
-    }
-  }
-
-  const chatHistory = await getRecentChatHistory(db, ctx.chat.id.toString());
-
-  // Analiz isteği kontrolü
-  if (selectedCoin && (message.includes('analiz') || message.includes('ne olur') || message.includes('ne yapayım'))) {
-    try {
-      await ctx.reply(`${selectedCoin.split('-')[0]}’yı analiz ediyorum, biraz bekle! 😎`);
-      const news = await fetchNews();
-      const forceReanalyze = message.includes('yeniden analiz yap');
-      const analysis = await analyzeCoin(selectedCoin, null, news, chatHistory, forceReanalyze);
-
-      const messageId = `${selectedCoin}-${analysis.tarih}`;
-      if (sentMessages.has(messageId)) {
-        await ctx.reply('Bu analizi az önce gönderdim kanka, tekrar bak istersen! 😊', getCoinButtons());
-        return;
-      }
-      sentMessages.add(messageId);
-
-      let response = `${selectedCoin} Analizi (${new Date(analysis.tarih).toLocaleString('tr-TR')}):\n`;
-      response += `  Güncel Fiyat: 💰 ${analysis.analyses.currentPrice ? analysis.analyses.currentPrice.toFixed(2) : 'Bilinmiyor'}\n`;
-      response += `  Giriş: 📉 ${analysis.analyses.giriş.toFixed(2)}\n`;
-      response += `  Kısa Vadeli Çıkış (4-6 saat): 📈 ${analysis.analyses.shortTermÇıkış.toFixed(2)}\n`;
-      response += `  Günlük Çıkış (24 saat): 📈 ${analysis.analyses.dailyÇıkış.toFixed(2)}\n`;
-      response += `  Haftalık Çıkış (1 hafta): 📈 ${analysis.analyses.weeklyÇıkış.toFixed(2)}\n`;
-      response += `  Uzun Vadeli Çıkış (1-2 hafta): 📈 ${analysis.analyses.longTermÇıkış.toFixed(2)}\n`;
-      response += `  Stop-Loss: 🛑 ${analysis.analyses.stopLoss.toFixed(2)}\n`;
-      response += `  Kısa Vadeli Destek (1sa): ${analysis.analyses.shortTermSupport.toFixed(2)}\n`;
-      response += `  Kısa Vadeli Direnç (1sa): ${analysis.analyses.shortTermResistance.toFixed(2)} (Aşılırsa Hedef: ${analysis.analyses.shortTermResistanceTarget.toFixed(2)})\n`;
-      response += `  Uzun Vadeli Destek (1hf): ${analysis.analyses.longTermSupport.toFixed(2)}\n`;
-      response += `  Uzun Vadeli Direnç (1hf): ${analysis.analyses.longTermResistance.toFixed(2)} (Aşılırsa Hedef: ${analysis.analyses.longTermResistanceTarget.toFixed(2)})\n`;
-      response += `  Yorum: ${analysis.analyses.yorum}\n`;
-
-      await ctx.reply(response, getCoinButtons());
-      if (ctx.chat.id.toString() === GROUP_ID) {
-        await bot.telegram.sendMessage(GROUP_ID, response, getCoinButtons());
-      }
-      await saveChatHistory(db, ctx.chat.id.toString(), `Text: analyze_${selectedCoin}`);
-    } catch (error) {
-      console.error(`Text analyze error for ${selectedCoin}:`, error);
-      await ctx.reply('Analiz sırasında hata oluştu, butonlardan dene kanka! 😓', getCoinButtons());
-    }
-    return;
-  }
-
-  // Hızlı durum isteği
-  if (selectedCoin && (message.includes('durum') || message.includes('ne durumda'))) {
-    try {
-      const status = await getQuickStatus(selectedCoin);
-      await ctx.reply(status, getCoinButtons());
-      await saveChatHistory(db, ctx.chat.id.toString(), `Text: status_${selectedCoin}`);
-    } catch (error) {
-      console.error(`Text status error for ${selectedCoin}:`, error);
-      await ctx.reply('Durum kontrolünde hata oluştu, butonlardan dene kanka! 😓', getCoinButtons());
-    }
-    return;
-  }
-
-  // Alarm kurma isteği
-  if (selectedCoin && message.includes('alarm kur')) {
-    try {
-      await ctx.reply(`📢 ${selectedCoin.split('-')[0]} için alarm fiyatını yaz (ör. 0.50):`, {
-        reply_markup: { force_reply: true }
-      });
-      bot.hears(/^\d+\.?\d*$/, async (ctx) => {
-        const price = parseFloat(ctx.message.text);
-        if (isNaN(price)) {
-          await ctx.reply('Geçerli bir fiyat gir kanka (ör. 0.50)! 😊', getCoinButtons());
-          return;
-        }
-        try {
-          priceAlarms.set(`${selectedCoin}-${ctx.chat.id}`, { chatId: ctx.chat.id.toString(), targetPrice: price });
-          const { startPriceWebSocket } = startWebSocket(selectedCoin, price, async ({ price: currentPrice }) => {
-            if (Math.abs(currentPrice - price) <= 0.01 * price) {
-              try {
-                const news = await fetchNews();
-                const chatHistory = await getRecentChatHistory(db, ctx.chat.id.toString());
-                const cachedAnalysis = await getCachedAnalysis(db, selectedCoin);
-                let analysis;
-                if (cachedAnalysis) {
-                  analysis = { coin: selectedCoin, tarih: cachedAnalysis.tarih, analyses: cachedAnalysis };
-                } else {
-                  analysis = await analyzeCoin(selectedCoin, null, news, chatHistory);
-                }
-                const messageId = `${selectedCoin}-${analysis.tarih}`;
-                if (sentMessages.has(messageId)) return;
-                sentMessages.add(messageId);
-
-                let message = `Alarm: ${selectedCoin.split('-')[0]} ${currentPrice.toFixed(2)}'e ${currentPrice <= price ? 'düştü' : 'çıktı'}! 🚨\n`;
-                message += `${selectedCoin} Analizi (${new Date(analysis.tarih).toLocaleString('tr-TR')}):\n`;
-                message += `  Güncel Fiyat: 💰 ${analysis.analyses.currentPrice ? analysis.analyses.currentPrice.toFixed(2) : 'Bilinmiyor'}\n`;
-                message += `  Giriş: 📉 ${analysis.analyses.giriş.toFixed(2)}\n`;
-                message += `  Kısa Vadeli Çıkış (4-6 saat): 📈 ${analysis.analyses.shortTermÇıkış.toFixed(2)}\n`;
-                message += `  Günlük Çıkış (24 saat): 📈 ${analysis.analyses.dailyÇıkış.toFixed(2)}\n`;
-                message += `  Haftalık Çıkış (1 hafta): 📈 ${analysis.analyses.weeklyÇıkış.toFixed(2)}\n`;
-                message += `  Uzun Vadeli Çıkış (1-2 hafta): 📈 ${analysis.analyses.longTermÇıkış.toFixed(2)}\n`;
-                message += `  Stop-Loss: 🛑 ${analysis.analyses.stopLoss.toFixed(2)}\n`;
-                message += `  Kısa Vadeli Destek (1sa): ${analysis.analyses.shortTermSupport.toFixed(2)}\n`;
-                message += `  Kısa Vadeli Direnç (1sa): ${analysis.analyses.shortTermResistance.toFixed(2)} (Aşılırsa Hedef: ${analysis.analyses.shortTermResistanceTarget.toFixed(2)})\n`;
-                message += `  Uzun Vadeli Destek (1hf): ${analysis.analyses.longTermSupport.toFixed(2)}\n`;
-                message += `  Uzun Vadeli Direnç (1hf): ${analysis.analyses.longTermResistance.toFixed(2)} (Aşılırsa Hedef: ${analysis.analyses.longTermResistanceTarget.toFixed(2)})\n`;
-                message += `  Yorum: ${analysis.analyses.yorum}\n`;
-                await ctx.reply(message, getCoinButtons());
-                if (ctx.chat.id.toString() === GROUP_ID) {
-                  await bot.telegram.sendMessage(GROUP_ID, message, getCoinButtons());
-                }
-                await bot.telegram.sendMessage('1616739367', message, getCoinButtons());
-                priceAlarms.delete(`${selectedCoin}-${ctx.chat.id}`);
-              } catch (error) {
-                console.error('Alarm error:', error);
-                await ctx.reply(`Alarm: ${selectedCoin.split('-')[0]} ${currentPrice.toFixed(2)}'e ulaştı, ancak analiz alınamadı. 😓`, getCoinButtons());
-              }
-            }
-          });
-          startPriceWebSocket(selectedCoin, price, () => {});
-          await ctx.reply(`${selectedCoin.split('-')[0]} için ${price} alarmı kuruldu. 🔔`, getCoinButtons());
-          await saveChatHistory(db, ctx.chat.id.toString(), `Text: alarm_${selectedCoin}_${price}`);
-        } catch (error) {
-          console.error('Text alarm set error:', error);
-          await ctx.reply('Alarm kurarken hata oluştu, butonlardan dene kanka! 😓', getCoinButtons());
-        }
-      });
-      await saveChatHistory(db, ctx.chat.id.toString(), `Text: alarm_${selectedCoin}`);
-    } catch (error) {
-      console.error('Text alarm error:', error);
-      await ctx.reply('Alarm kurma sırasında hata oluştu, butonlardan dene kanka! 😓', getCoinButtons());
-    }
-    return;
-  }
-
-  // Genel sohbet
-  try {
-    const prompt = `Kullanıcı mesajı: "${message}". Samimi, Türkçe, kısa bir yanıt ver (maksimum 100 kelime). Kripto para konseptine uygun, trader’lara hitap eden bir üslup kullan. Coin veya analizle ilgili değilse, genel bir sohbet tarzında cevap ver ve kullanıcıyı butonlara yönlendir. Son 10 konuşma: ${chatHistory.join('; ')}.`;
-    let response = await rateLimitedCallGrok(prompt);
-    if (!response) {
-      response = 'Kanka, neyi kastediyorsun tam anlamadım! 😅 Coin analizi veya durum için butonları kullan, hemen bakalım! 🚀';
-    }
-    await ctx.reply(response, getCoinButtons());
-  } catch (error) {
-    console.error('Text chat error:', error);
-    await ctx.reply('Bir şeyler ters gitti kanka, butonlarla dene istersen! 😓', getCoinButtons());
-  }
-});
-
+// Commands
 bot.command('start', async (ctx) => {
   console.log('Start komutu alındı, chat ID:', ctx.chat.id);
   await ctx.reply(
-    'Merhaba kanka! Kripto analiz botun hazır! 🚀 Coin seçip analiz yap, durum kontrol et veya bildirimleri durdur. 😎',
+    'Merhaba kanka! Kripto analiz botun hazır! 🚀 Coin seçip analiz yap, durum kontrol et, alarm kur veya bildirimleri durdur. 😎',
     getCoinButtons()
   );
   await saveChatHistory(db, ctx.chat.id.toString(), ctx.message.text);
@@ -906,6 +753,30 @@ bot.command('alarm_stop', async (ctx) => {
     console.error('Alarm stop error:', error);
     await ctx.reply('Alarm durdurma sırasında hata oluştu, tekrar deneyin. 😓', getCoinButtons());
   }
+});
+
+// Updated: Inline Actions
+// Alarm Stop (Öncelikli)
+bot.action('alarm_stop', async (ctx) => {
+  console.log('Inline alarm stop isteği, chat ID:', ctx.chat.id);
+  try {
+    isBitcoinMonitoringPaused = true;
+    pauseEndTime = Date.now() + 24 * 60 * 60 * 1000;
+    const pauseMessage = `Bitcoin izleme bildirimleri 24 saatliğine durduruldu. Kalan süre: ${(pauseEndTime - Date.now()) / 1000 / 60} dakika. 24 saat sonra otomatik devam edecek. 🛑`;
+    await ctx.reply(pauseMessage, getCoinButtons());
+    console.log(pauseMessage);
+    await saveChatHistory(db, ctx.chat.id.toString(), 'Inline: alarm_stop');
+  } catch (error) {
+    console.error('Inline alarm stop error:', error);
+    await ctx.reply('Alarm durdurma sırasında hata oluştu, tekrar deneyin. 😓', getCoinButtons());
+  }
+});
+
+// Updated: Alarm Menu
+bot.action('alarm_menu', async (ctx) => {
+  console.log('Inline alarm menu isteği, chat ID:', ctx.chat.id);
+  await ctx.reply('Hangi coin için alarm kuralım? 😊', getAlarmButtons());
+  await saveChatHistory(db, ctx.chat.id.toString(), 'Inline: alarm_menu');
 });
 
 bot.action(/analyze_(.+)/, async (ctx) => {
@@ -974,6 +845,7 @@ bot.action(/status_(.+)/, async (ctx) => {
   }
 });
 
+// Updated: Alarm Action
 bot.action(/alarm_(.+)/, async (ctx) => {
   const coin = ctx.match[1];
   console.log(`Inline alarm isteği: ${coin}, chat ID: ${ctx.chat.id}`);
@@ -982,18 +854,23 @@ bot.action(/alarm_(.+)/, async (ctx) => {
       await ctx.reply('Geçerli bir coin seç kanka! 😊', getCoinButtons());
       return;
     }
-    await ctx.reply(`📢 ${coin.split('-')[0]} için alarm fiyatını yaz (ör. 0.50):`, {
+    await ctx.reply(`📢 ${coin.split('-')[0]} için alarm fiyatını yaz (ör. 330.50):`, {
       reply_markup: { force_reply: true }
     });
-    bot.hears(/^\d+\.?\d*$/, async (ctx) => {
+
+    // Updated: Fiyat girişi işleyici
+    bot.hears(/^\d*\.?\d+$/, async (ctx) => {
       const price = parseFloat(ctx.message.text);
-      if (isNaN(price)) {
-        await ctx.reply('Geçerli bir fiyat gir kanka (ör. 0.50)! 😊', getCoinButtons());
+      if (isNaN(price) || price <= 0) {
+        await ctx.reply('Geçerli bir fiyat gir kanka (ör. 330.50)! 😊', getCoinButtons());
         return;
       }
       try {
-        priceAlarms.set(`${coin}-${ctx.chat.id}`, { chatId: ctx.chat.id.toString(), targetPrice: price });
-        const { startPriceWebSocket } = startWebSocket(coin, price, async ({ price: currentPrice }) => {
+        const alarmKey = `${coin}-${ctx.chat.id}`;
+        priceAlarms.set(alarmKey, { chatId: ctx.chat.id.toString(), targetPrice: price });
+        console.log(`Alarm kaydedildi: ${alarmKey}, Fiyat: ${price}`);
+
+        const { stop } = await startWebSocket(coin, price, ctx.chat.id, async ({ price: currentPrice }) => {
           if (Math.abs(currentPrice - price) <= 0.01 * price) {
             try {
               const news = await fetchNews();
@@ -1028,40 +905,202 @@ bot.action(/alarm_(.+)/, async (ctx) => {
                 await bot.telegram.sendMessage(GROUP_ID, message, getCoinButtons());
               }
               await bot.telegram.sendMessage('1616739367', message, getCoinButtons());
-              priceAlarms.delete(`${coin}-${ctx.chat.id}`);
+              priceAlarms.delete(alarmKey);
+              stop();
             } catch (error) {
-              console.error('Alarm error:', error);
+              console.error('Alarm bildirim hatası:', error);
               await ctx.reply(`Alarm: ${coin.split('-')[0]} ${currentPrice.toFixed(2)}'e ulaştı, ancak analiz alınamadı. 😓`, getCoinButtons());
+              priceAlarms.delete(alarmKey);
+              stop();
             }
           }
         });
-        startPriceWebSocket(coin, price, () => {});
-        await ctx.reply(`${coin.split('-')[0]} için ${price} alarmı kuruldu. 🔔`, getCoinButtons());
+
+        await ctx.reply(`${coin.split('-')[0]} için ${price.toFixed(2)} alarmı kuruldu. 🔔`, getCoinButtons());
         await saveChatHistory(db, ctx.chat.id.toString(), `Inline: alarm_${coin}_${price}`);
       } catch (error) {
         console.error('Inline alarm set error:', error);
-        await ctx.reply('Alarm kurarken hata oluştu, tekrar dene! 😓', getCoinButtons());
+        await ctx.reply('Alarm kurarken hata oluştu, tekrar dene kanka! 😓', getCoinButtons());
       }
     });
     await saveChatHistory(db, ctx.chat.id.toString(), `Inline: alarm_${coin}`);
   } catch (error) {
     console.error('Inline alarm error:', error);
-    await ctx.reply('Alarm kurma sırasında hata oluştu, tekrar dene! 😓', getCoinButtons());
+    await ctx.reply('Alarm kurma sırasında hata oluştu, tekrar dene kanka! 😓', getCoinButtons());
   }
 });
 
-bot.action('alarm_stop', async (ctx) => {
-  console.log('Inline alarm stop isteği, chat ID:', ctx.chat.id);
+// Text Handler
+bot.on('text', async (ctx) => {
+  const message = ctx.message.text.trim().toLowerCase();
+  console.log(`Metin mesajı alındı: ${message}, chat ID: ${ctx.chat.id}`);
+  await saveChatHistory(db, ctx.chat.id.toString(), message);
+
+  if (message.startsWith('/')) {
+    return;
+  }
+
+  const coinMap = {
+    'aave': 'AAVE-USDT',
+    'comp': 'COMP-USDT',
+    'ltc': 'LTC-USDT',
+    'xlm': 'XLM-USDT',
+    'ada': 'ADA-USDT',
+    'mkr': 'MKR-USDT',
+    'btc': 'BTC-USDT',
+    'eth': 'ETH-USDT',
+    'bitcoin': 'BTC-USDT',
+    'ethereum': 'ETH-USDT'
+  };
+  let selectedCoin = null;
+  for (const [key, coin] of Object.entries(coinMap)) {
+    if (message.includes(key)) {
+      selectedCoin = coin;
+      break;
+    }
+  }
+
+  const chatHistory = await getRecentChatHistory(db, ctx.chat.id.toString());
+
+  if (selectedCoin && (message.includes('analiz') || message.includes('ne olur') || message.includes('ne yapayım'))) {
+    try {
+      await ctx.reply(`${selectedCoin.split('-')[0]}’yı analiz ediyorum, biraz bekle! 😎`);
+      const news = await fetchNews();
+      const forceReanalyze = message.includes('yeniden analiz yap');
+      const analysis = await analyzeCoin(selectedCoin, null, news, chatHistory, forceReanalyze);
+
+      const messageId = `${selectedCoin}-${analysis.tarih}`;
+      if (sentMessages.has(messageId)) {
+        await ctx.reply('Bu analizi az önce gönderdim kanka, tekrar bak istersen! 😊', getCoinButtons());
+        return;
+      }
+      sentMessages.add(messageId);
+
+      let response = `${selectedCoin} Analizi (${new Date(analysis.tarih).toLocaleString('tr-TR')}):\n`;
+      response += `  Güncel Fiyat: 💰 ${analysis.analyses.currentPrice ? analysis.analyses.currentPrice.toFixed(2) : 'Bilinmiyor'}\n`;
+      response += `  Giriş: 📉 ${analysis.analyses.giriş.toFixed(2)}\n`;
+      response += `  Kısa Vadeli Çıkış (4-6 saat): 📈 ${analysis.analyses.shortTermÇıkış.toFixed(2)}\n`;
+      response += `  Günlük Çıkış (24 saat): 📈 ${analysis.analyses.dailyÇıkış.toFixed(2)}\n`;
+      response += `  Haftalık Çıkış (1 hafta): 📈 ${analysis.analyses.weeklyÇıkış.toFixed(2)}\n`;
+      response += `  Uzun Vadeli Çıkış (1-2 hafta): 📈 ${analysis.analyses.longTermÇıkış.toFixed(2)}\n`;
+      response += `  Stop-Loss: 🛑 ${analysis.analyses.stopLoss.toFixed(2)}\n`;
+      response += `  Kısa Vadeli Destek (1sa): ${analysis.analyses.shortTermSupport.toFixed(2)}\n`;
+      response += `  Kısa Vadeli Direnç (1sa): ${analysis.analyses.shortTermResistance.toFixed(2)} (Aşılırsa Hedef: ${analysis.analyses.shortTermResistanceTarget.toFixed(2)})\n`;
+      response += `  Uzun Vadeli Destek (1hf): ${analysis.analyses.longTermSupport.toFixed(2)}\n`;
+      response += `  Uzun Vadeli Direnç (1hf): ${analysis.analyses.longTermResistance.toFixed(2)} (Aşılırsa Hedef: ${analysis.analyses.longTermResistanceTarget.toFixed(2)})\n`;
+      response += `  Yorum: ${analysis.analyses.yorum}\n`;
+
+      await ctx.reply(response, getCoinButtons());
+      if (ctx.chat.id.toString() === GROUP_ID) {
+        await bot.telegram.sendMessage(GROUP_ID, response, getCoinButtons());
+      }
+      await saveChatHistory(db, ctx.chat.id.toString(), `Text: analyze_${selectedCoin}`);
+    } catch (error) {
+      console.error(`Text analyze error for ${selectedCoin}:`, error);
+      await ctx.reply('Analiz sırasında hata oluştu, butonlardan dene kanka! 😓', getCoinButtons());
+    }
+    return;
+  }
+
+  if (selectedCoin && (message.includes('durum') || message.includes('ne durumda'))) {
+    try {
+      const status = await getQuickStatus(selectedCoin);
+      await ctx.reply(status, getCoinButtons());
+      await saveChatHistory(db, ctx.chat.id.toString(), `Text: status_${selectedCoin}`);
+    } catch (error) {
+      console.error(`Text status error for ${selectedCoin}:`, error);
+      await ctx.reply('Durum kontrolünde hata oluştu, butonlardan dene kanka! 😓', getCoinButtons());
+    }
+    return;
+  }
+
+  if (selectedCoin && message.includes('alarm kur')) {
+    try {
+      await ctx.reply(`📢 ${selectedCoin.split('-')[0]} için alarm fiyatını yaz (ör. 330.50):`, {
+        reply_markup: { force_reply: true }
+      });
+      bot.hears(/^\d*\.?\d+$/, async (ctx) => {
+        const price = parseFloat(ctx.message.text);
+        if (isNaN(price) || price <= 0) {
+          await ctx.reply('Geçerli bir fiyat gir kanka (ör. 330.50)! 😊', getCoinButtons());
+          return;
+        }
+        try {
+          const alarmKey = `${selectedCoin}-${ctx.chat.id}`;
+          priceAlarms.set(alarmKey, { chatId: ctx.chat.id.toString(), targetPrice: price });
+          console.log(`Alarm kaydedildi: ${alarmKey}, Fiyat: ${price}`);
+
+          const { stop } = await startWebSocket(selectedCoin, price, ctx.chat.id, async ({ price: currentPrice }) => {
+            if (Math.abs(currentPrice - price) <= 0.01 * price) {
+              try {
+                const news = await fetchNews();
+                const chatHistory = await getRecentChatHistory(db, ctx.chat.id.toString());
+                const cachedAnalysis = await getCachedAnalysis(db, selectedCoin);
+                let analysis;
+                if (cachedAnalysis) {
+                  analysis = { coin: selectedCoin, tarih: cachedAnalysis.tarih, analyses: cachedAnalysis };
+                } else {
+                  analysis = await analyzeCoin(selectedCoin, null, news, chatHistory);
+                }
+                const messageId = `${selectedCoin}-${analysis.tarih}`;
+                if (sentMessages.has(messageId)) return;
+                sentMessages.add(messageId);
+
+                let message = `Alarm: ${selectedCoin.split('-')[0]} ${currentPrice.toFixed(2)}'e ${currentPrice <= price ? 'düştü' : 'çıktı'}! 🚨\n`;
+                message += `${selectedCoin} Analizi (${new Date(analysis.tarih).toLocaleString('tr-TR')}):\n`;
+                message += `  Güncel Fiyat: 💰 ${analysis.analyses.currentPrice ? analysis.analyses.currentPrice.toFixed(2) : 'Bilinmiyor'}\n`;
+                message += `  Giriş: 📉 ${analysis.analyses.giriş.toFixed(2)}\n`;
+                message += `  Kısa Vadeli Çıkış (4-6 saat): 📈 ${analysis.analyses.shortTermÇıkış.toFixed(2)}\n`;
+                message += `  Günlük Çıkış (24 saat): 📈 ${analysis.analyses.dailyÇıkış.toFixed(2)}\n`;
+                message += `  Haftalık Çıkış (1 hafta): 📈 ${analysis.analyses.weeklyÇıkış.toFixed(2)}\n`;
+                message += `  Uzun Vadeli Çıkış (1-2 hafta): 📈 ${analysis.analyses.longTermÇıkış.toFixed(2)}\n`;
+                message += `  Stop-Loss: 🛑 ${analysis.analyses.stopLoss.toFixed(2)}\n`;
+                message += `  Kısa Vadeli Destek (1sa): ${analysis.analyses.shortTermSupport.toFixed(2)}\n`;
+                message += `  Kısa Vadeli Direnç (1sa): ${analysis.analyses.shortTermResistance.toFixed(2)} (Aşılırsa Hedef: ${analysis.analyses.shortTermResistanceTarget.toFixed(2)})\n`;
+                message += `  Uzun Vadeli Destek (1hf): ${analysis.analyses.longTermSupport.toFixed(2)}\n`;
+                message += `  Uzun Vadeli Direnç (1hf): ${analysis.analyses.longTermResistance.toFixed(2)} (Aşılırsa Hedef: ${analysis.analyses.longTermResistanceTarget.toFixed(2)})\n`;
+                message += `  Yorum: ${analysis.analyses.yorum}\n`;
+                await ctx.reply(message, getCoinButtons());
+                if (ctx.chat.id.toString() === GROUP_ID) {
+                  await bot.telegram.sendMessage(GROUP_ID, message, getCoinButtons());
+                }
+                await bot.telegram.sendMessage('1616739367', message, getCoinButtons());
+                priceAlarms.delete(alarmKey);
+                stop();
+              } catch (error) {
+                console.error('Alarm bildirim hatası:', error);
+                await ctx.reply(`Alarm: ${selectedCoin.split('-')[0]} ${currentPrice.toFixed(2)}'e ulaştı, ancak analiz alınamadı. 😓`, getCoinButtons());
+                priceAlarms.delete(alarmKey);
+                stop();
+              }
+            }
+          });
+
+          await ctx.reply(`${selectedCoin.split('-')[0]} için ${price.toFixed(2)} alarmı kuruldu. 🔔`, getCoinButtons());
+          await saveChatHistory(db, ctx.chat.id.toString(), `Text: alarm_${selectedCoin}_${price}`);
+        } catch (error) {
+          console.error('Text alarm set error:', error);
+          await ctx.reply('Alarm kurarken hata oluştu, butonlardan dene kanka! 😓', getCoinButtons());
+        }
+      });
+      await saveChatHistory(db, ctx.chat.id.toString(), `Text: alarm_${selectedCoin}`);
+    } catch (error) {
+      console.error('Text alarm error:', error);
+      await ctx.reply('Alarm kurma sırasında hata oluştu, butonlardan dene kanka! 😓', getCoinButtons());
+    }
+    return;
+  }
+
   try {
-    isBitcoinMonitoringPaused = true;
-    pauseEndTime = Date.now() + 24 * 60 * 60 * 1000;
-    const pauseMessage = `Bitcoin izleme bildirimleri 24 saatliğine durduruldu. Kalan süre: ${(pauseEndTime - Date.now()) / 1000 / 60} dakika. 24 saat sonra otomatik devam edecek. 🛑`;
-    await ctx.reply(pauseMessage, getCoinButtons());
-    console.log(pauseMessage);
-    await saveChatHistory(db, ctx.chat.id.toString(), 'Inline: alarm_stop');
+    const prompt = `Kullanıcı mesajı: "${message}". Samimi, Türkçe, kısa bir yanıt ver (maksimum 100 kelime). Kripto para konseptine uygun, trader’lara hitap eden bir üslup kullan. Coin veya analizle ilgili değilse, genel bir sohbet tarzında cevap ver ve kullanıcıyı butonlara yönlendir. Son 10 konuşma: ${chatHistory.join('; ')}.`;
+    let response = await rateLimitedCallGrok(prompt);
+    if (!response) {
+      response = 'Kanka, neyi kastediyorsun tam anlamadım! 😅 Coin analizi veya durum için butonları kullan, hemen bakalım! 🚀';
+    }
+    await ctx.reply(response, getCoinButtons());
   } catch (error) {
-    console.error('Inline alarm stop error:', error);
-    await ctx.reply('Alarm durdurma sırasında hata oluştu, tekrar deneyin. 😓', getCoinButtons());
+    console.error('Text chat error:', error);
+    await ctx.reply('Bir şeyler ters gitti kanka, butonlarla dene istersen! 😓', getCoinButtons());
   }
 });
 
