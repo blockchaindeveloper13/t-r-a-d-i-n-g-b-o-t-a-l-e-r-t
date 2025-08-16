@@ -7,6 +7,7 @@ const { RSI, MACD, EMA, PSAR, StochasticRSI } = require('technicalindicators');
 const axios = require('axios');
 const WebSocket = require('ws');
 const http = require('http');
+const { analyzeBinanceCoin, findTopTradeOpportunities } = require('./binanceData');
 const fs = require('fs').promises;
 const path = require('path');
 
