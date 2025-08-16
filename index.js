@@ -334,22 +334,27 @@ async function fetchTopCoinsCMC(limit, start) {
 }
 
 async function getTopCoinsFromCMCAndCMCal() {
-  const cmcalCoins = await fetchCoinMarketCalCoins();
-  const cmcCoins = [
-    ...(await fetchTopCoinsCMC(100, 1)), // Top 100
-    ...(await fetchTopCoinsCMC(400, 101)), // 101-500
-  ];
-
-  const topCoins = cmcCoins
-    .filter(cmc => cmcalCoins.some(cmcal => cmcal.symbol === cmc.symbol))
-    .sort((a, b) => b.marketCap - a.marketCap);
-
-  return {
-    top100: topCoins.slice(0, 100),
-    top500: topCoins.slice(0, 500),
-  };
+  try {
+    const top100 = await fetchTopCoinsCMC(100, 1);
+    const top500 = await fetchTopCoinsCMC(500, 101);
+    const cmcCoins = [...top100, ...top500.slice(100)];
+    console.log('CMC Coins:', cmcCoins); // Coin listesini logla
+    if (!cmcCoins.length) {
+      console.error('No coins fetched from CoinMarketCap');
+      return { top100: [], top500: [] };
+    }
+    const cmcalCoins = await rateLimitedCallCoinMarketCal('https://developers.coinmarketcal.com/v1/coins', {});
+    console.log('CMCal Coins:', cmcalCoins); // CoinMarketCal coinlerini logla
+    const cmcalCoinSymbols = cmcalCoins.map(coin => coin.symbol.toLowerCase());
+    return {
+      top100: cmcCoins.filter(coin => cmcalCoinSymbols.includes(coin.symbol.toLowerCase())),
+      top500: cmcCoins.filter(coin => cmcalCoinSymbols.includes(coin.symbol.toLowerCase())),
+    };
+  } catch (error) {
+    console.error('getTopCoinsFromCMCAndCMCal error:', error.message);
+    return { top100: [], top500: [] };
+  }
 }
-
 // Fırsat coin’leri bulma
 async function findOpportunityCoins() {
   const { top100, top500 } = await getTopCoinsFromCMCAndCMCal();
