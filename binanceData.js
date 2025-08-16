@@ -424,9 +424,11 @@ setInterval(() => {
 module.exports = {
   getBinanceCurrentPrice,
   fetchBinanceKlines,
+  wsConnections,
   calculateBinanceIndicators,
   calculateBinanceATR,
   analyzeBinanceCoin,
   fetchBinanceTop100Coins,
   findTopTradeOpportunities,
 };
+
