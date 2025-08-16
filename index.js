@@ -60,7 +60,7 @@ async function loadEventsFromCache() {
 }
 
 async function updateCache() {
-  const events = await fetchTopCoinEvents('catalyst_events');
+  const events = await fetchTopCoinEvents();
   if (events.length > 0) {
     await saveEventsToCache(events);
     console.log('Cache güncellendi, etkinlik sayısı:', events.length);
@@ -71,6 +71,10 @@ async function updateCache() {
 
 // Rate limit for Grok API
 async function rateLimitedCallGrok(prompt, retries = 3) {
+  const systemMessage = `
+Sen bir kripto para analiz botusun, Grok-4-0709 modelini kullanıyorsun. CoinMarketCal verileri /tmp/coinmarketcal_events.json dosyasında saklanıyor, analiz yaparken bu JSON dosyasını oku ve etkinlikleri değerlendir. Kısa vadeli zaman dilimlerini (1min, 5min, 30min, 1hour) inceleyip teknik ve temel analize dayalı kısa, samimi, anlaşılır Türkçe yorum yap (maksimum 300 kelime, kelime sayısını yazma). Güncel fiyat (💰), giriş (📉), kısa vadeli çıkış (4-6 saat, 📈), günlük çıkış (24 saat, 📈), haftalık çıkış (1 hafta, 📈), uzun vadeli çıkış (1-2 hafta, 📈) ve stop-loss (🛑) fiyatını giriş fiyatının altında 1.5 * ATR mesafede belirle. Giriş fiyatını belirlerken fiyatın düşebileceği potansiyel dip seviyelerini (SMA-50, PSAR, Fibonacci %38.2, ATR) analiz et, güncel fiyattan direkt giriş önerme, kâr marjını maksimize et. Kısa vadeli (1sa) ve uzun vadeli (1 hafta) destek/direnç noktaları belirle, her direnç noktası aşılırsa olası fiyat hedeflerini ver. Temel analiz için JSON’daki CoinMarketCal etkinliklerini (yeni borsa listelemeleri, ortaklıklar, halving, vb.) değerlendir, pozitif/negatif etkisini vurgula, CoinMarketCal’ı kaynak olarak belirt. Konuşma geçmişini dikkate al, samimi sohbet et. Kullanıcı "yeniden analiz yap" demedikçe JSON’daki son verileri kullan, yeni analiz yapma. "Yeniden analiz yap" denirse yeni analiz yap ve önbelleği güncelle. Serbest metin mesajlarında coin adı geçiyorsa analizi veya durumu döndür, yoksa samimi bir şekilde sohbet et.
+`;
+
   for (let i = 0; i < retries; i++) {
     try {
       const now = Date.now();
@@ -94,7 +98,7 @@ async function rateLimitedCallGrok(prompt, retries = 3) {
           messages: [
             {
               role: 'system',
-              content: 'Sen bir kripto para analiz botusun, Grok-4-0709 modelini kullanıyorsun. Kısa vadeli zaman dilimlerini (1min, 5min, 30min, 1hour) inceleyip teknik ve temel analize dayalı kısa, samimi, anlaşılır Türkçe yorum yap (maksimum 300 kelime, kelime sayısını yazma). Güncel fiyat (💰), giriş (📉), kısa vadeli çıkış (4-6 saat, 📈), günlük çıkış (24 saat, 📈), haftalık çıkış (1 hafta, 📈), uzun vadeli çıkış (1-2 hafta, 📈) ve stop-loss (🛑) fiyatını giriş fiyatının altında 1.5 * ATR mesafede belirle. Giriş fiyatını belirlerken fiyatın düşebileceği potansiyel dip seviyelerini (SMA-50, PSAR, Fibonacci %38.2, ATR) analiz et, güncel fiyattan direkt giriş önerme, kâr marjını maksimize et. Kısa vadeli (1sa) ve uzun vadeli (1 hafta) destek/direnç noktaları belirle, her direnç noktası aşılırsa olası fiyat hedeflerini ver. Temel analiz için haberlerin ve CoinMarketCal etkinliklerinin pozitif/negatif etkisini vurgula, CoinMarketCal’ı kaynak olarak belirt. Konuşma geçmişini dikkate al, samimi sohbet et. Kullanıcı "yeniden analiz yap" demedikçe önbellekteki son analizi kullan, yeni analiz yapma. "Yeniden analiz yap" denirse yeni analiz yap ve önbelleği güncelle. Serbest metin mesajlarında coin adı geçiyorsa analizi veya durumu döndür, yoksa samimi bir şekilde sohbet et.'
+              content: systemMessage
             },
             { role: 'user', content: prompt },
           ],
@@ -120,7 +124,6 @@ async function rateLimitedCallGrok(prompt, retries = 3) {
     }
   }
 }
-
 // Rate limit for CoinMarketCal API
 async function rateLimitedCallCoinMarketCal(url, params, retries = 3) {
   for (let i = 0; i < retries; i++) {
@@ -302,19 +305,17 @@ async function fetchCoinMarketCalCoins() {
 }
 
 // CoinMarketCal etkinlikleri
-async function fetchTopCoinEvents() { // filter parametresini kaldırdık
+async function fetchTopCoinEvents() {
   try {
     const events = await rateLimitedCallCoinMarketCal('https://developers.coinmarketcal.com/v1/events', {
-      max: 100, // Daha fazla etkinlik için artırdık
-      dateRangeStart: new Date().toISOString().split('T')[0],
-      dateRangeEnd: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], // 2 hafta
+      max: 200, // Daha fazla etkinlik için artırdık
       showVotes: true,
       showViews: true,
       translations: 'tr',
     });
     console.log('CoinMarketCal etkinlik sayısı:', events.length);
     const filteredEvents = events
-      .filter(event => event.coins && Array.isArray(event.coins) && event.coins.length > 0 && event.title?.en)
+      .filter(event => event.coins && Array.isArray(event.coins) && event.coins.length > 0)
       .map(event => ({
         coin: event.coins[0]?.name || 'Bilinmiyor',
         symbol: event.coins[0]?.symbol || 'Unknown',
@@ -334,15 +335,19 @@ async function fetchTopCoinEvents() { // filter parametresini kaldırdık
     return [];
   }
 }
-
 // CoinMarketCal etkinliklerini Grok ile yorumlama
 async function analyzeCoinMarketCalEvents(events, chatHistory) {
   try {
-    if (!events.length) {
-      return 'Analiz edilecek etkinlik bulunamadı.';
+    // JSON’dan etkinlikleri yükle
+    let cachedEvents = await loadEventsFromCache();
+    if (!cachedEvents || cachedEvents.length === 0) {
+      cachedEvents = events.length > 0 ? events : await updateCache();
+    }
+    if (!cachedEvents.length) {
+      return 'JSON cache’te veya API’de etkinlik bulunamadı.';
     }
 
-    const eventSummaries = events.map(event => ({
+    const eventSummaries = cachedEvents.map(event => ({
       coin: event.coin,
       symbol: event.symbol,
       title: event.title,
@@ -356,9 +361,9 @@ async function analyzeCoinMarketCalEvents(events, chatHistory) {
     }));
 
     const prompt = `
-      Aşağıdaki CoinMarketCal etkinliklerini analiz et ve hangi coinlerin iyi yatırım fırsatları sunduğunu belirle. Her etkinliğin başlığını, açıklamasını, etki derecesini, catalyst skorunu, görüntülenme ve oy sayısını dikkate al. Halving, token yakma, buyback, borsa listelemeleri, AMA’lar veya airdrop gibi etkinliklere öncelik ver. Popülerlik (viewCount, voteCount) ve açıklamadaki olumlu kelimeleri (örneğin, "lansman", "ortaklık", "listeleme") değerlendirerek fiyat artışı potansiyeli taşıyan coin’leri seç. Sonuçları kısa ve anlaşılır bir şekilde özetle, her coin için neden fırsat sunduğunu ve kanıt linkini belirt.
+      Aşağıdaki CoinMarketCal etkinliklerini JSON cache’ten aldım, analiz et ve hangi coinlerin iyi yatırım fırsatları sunduğunu belirle. Her etkinliğin başlığını, açıklamasını, etki derecesini, catalyst skorunu, görüntülenme ve oy sayısını dikkate al. Yeni borsa listelemeleri, ortaklıklar, halving, token yakma, buyback, AMA’lar veya airdrop gibi etkinliklere öncelik ver. Popülerlik (viewCount, voteCount) ve açıklamadaki olumlu kelimeleri (örneğin, "lansman", "ortaklık", "listeleme") değerlendirerek fiyat artışı potansiyeli taşıyan coin’leri seç. Sonuçları kısa ve anlaşılır bir şekilde özetle, her coin için neden fırsat sunduğunu ve kanıt linkini belirt.
 
-      Etkinlikler:
+      Etkinlikler (JSON cache’ten):
       ${JSON.stringify(eventSummaries, null, 2)}
 
       Çıktı formatı:
@@ -369,10 +374,10 @@ async function analyzeCoinMarketCalEvents(events, chatHistory) {
     `;
 
     const grokResponse = await rateLimitedCallGrok(prompt);
-    return grokResponse || 'Analiz yapılamadı, lütfen tekrar deneyin.';
+    return grokResponse || 'JSON’dan analiz yapılamadı, lütfen tekrar deneyin.';
   } catch (error) {
-    console.error('Grok analiz hatası:', error.message);
-    return 'Grok analizinde hata oluştu.';
+    console.error('Grok JSON analiz hatası:', error.message);
+    return 'Grok JSON analizinde hata oluştu.';
   }
 }
 
@@ -1365,7 +1370,7 @@ bot.action('coinmarketcal', async (ctx) => {
       return;
     }
 
-    const limitedEvents = events.slice(0, 10);
+    const limitedEvents = events.slice(0, 200);
     let eventMessage = '📅 CoinMarketCal Etkinlikleri (1 Hafta İçinde):\n';
     for (const event of limitedEvents) {
       eventMessage += `\n${event.coin}: ${event.title} (${event.date})\n`;
@@ -1428,8 +1433,8 @@ bot.action('update_coinmarketcal', async (ctx) => {
       return;
     }
 
-    const limitedEvents = events.slice(0, 10);
-    let eventMessage = '📅 Güncellenmiş CoinMarketCal Etkinlikleri (1 Hafta İçinde):\n';
+    const limitedEvents = events.slice(0, 20); // 20 etkinlik
+    let eventMessage = '📅 Güncellenmiş CoinMarketCal Etkinlikleri (Tüm Zamanlar):\n';
     for (const event of limitedEvents) {
       eventMessage += `\n${event.coin}: ${event.title} (${event.date})\n`;
       eventMessage += `Etki: ${event.impact}, Catalyst Skor: ${event.catalystScore}\n`;
@@ -1440,7 +1445,7 @@ bot.action('update_coinmarketcal', async (ctx) => {
     const maxMessageLength = 4000;
     if (eventMessage.length > maxMessageLength) {
       const messages = [];
-      let currentMessage = '📅 Güncellenmiş CoinMarketCal Etkinlikleri (1 Hafta İçinde):\n';
+      let currentMessage = '📅 Güncellenmiş CoinMarketCal Etkinlikleri (Tüm Zamanlar):\n';
       let currentLength = currentMessage.length;
 
       for (const event of limitedEvents) {
@@ -1470,9 +1475,9 @@ bot.action('update_coinmarketcal', async (ctx) => {
 
     const chatHistory = await getRecentChatHistory(db, ctx.chat.id.toString());
     const comment = await analyzeCoinMarketCalEvents(limitedEvents, chatHistory);
-    await ctx.reply(`📝 Grok Fırsat Analizi:\n${comment}`, getCoinButtons());
+    await ctx.reply(`📝 Grok Fırsat Analizi (JSON’dan):\n${comment}`, getCoinButtons());
     if (ctx.chat.id.toString() === GROUP_ID) {
-      await bot.telegram.sendMessage(GROUP_ID, `📝 Grok Fırsat Analizi:\n${comment}`, getCoinButtons());
+      await bot.telegram.sendMessage(GROUP_ID, `📝 Grok Fırsat Analizi (JSON’dan):\n${comment}`, getCoinButtons());
     }
     await saveChatHistory(db, ctx.chat.id.toString(), 'Inline: update_coinmarketcal');
   } catch (error) {
