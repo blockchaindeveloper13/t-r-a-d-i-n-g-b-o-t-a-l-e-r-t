@@ -7,6 +7,11 @@ const { RSI, MACD, EMA, PSAR, StochasticRSI } = require('technicalindicators');
 const axios = require('axios');
 const WebSocket = require('ws');
 const http = require('http');
+const fs = require('fs').promises;
+const path = require('path');
+
+// Cache dosyası
+const CACHE_FILE = path.join('/tmp', 'coinmarketcal_events.json');
 
 // Cache for API responses, analyses, and Bitcoin signals
 const cache = new Map();
@@ -34,6 +39,36 @@ const lastBitcoinSignal = { type: null, timestamp: 0, price: 0, comment: null };
 // Alarm storage
 const priceAlarms = new Map(); // coin -> {chatId, targetPrice}
 
+// JSON cache fonksiyonları
+async function saveEventsToCache(events) {
+  try {
+    await fs.writeFile(CACHE_FILE, JSON.stringify(events, null, 2));
+    console.log('Veriler cache’e kaydedildi:', CACHE_FILE);
+  } catch (error) {
+    console.error('Cache yazma hatası:', error.message);
+  }
+}
+
+async function loadEventsFromCache() {
+  try {
+    const data = await fs.readFile(CACHE_FILE, 'utf8');
+    return JSON.parse(data);
+  } catch (error) {
+    console.error('Cache okuma hatası:', error.message);
+    return null;
+  }
+}
+
+async function updateCache() {
+  const events = await fetchTopCoinEvents('catalyst_events');
+  if (events.length > 0) {
+    await saveEventsToCache(events);
+    console.log('Cache güncellendi, etkinlik sayısı:', events.length);
+    return events;
+  }
+  return [];
+}
+
 // Rate limit for Grok API
 async function rateLimitedCallGrok(prompt, retries = 3) {
   for (let i = 0; i < retries; i++) {
@@ -59,7 +94,7 @@ async function rateLimitedCallGrok(prompt, retries = 3) {
           messages: [
             {
               role: 'system',
-              content: 'Sen bir kripto para analiz botusun, Grok-4-0709 modelini kullanıyorsun. Kısa vadeli zaman dilimlerini (1min, 5min, 30min, 1hour) inceleyip teknik ve temel analize dayalı kısa, samimi, anlaşılır Türkçe yorum yap (maksimum 300 kelime, kelime sayısını yazma). Güncel fiyat (💰), giriş (📉), kısa vadeli çıkış (4-6 saat, 📈), günlük çıkış (24 saat, 📈), haftalık çıkış (1 hafta, 📈), uzun vadeli çıkış (1-2 hafta, 📈) ve stop-loss (🛑) fiyatını giriş fiyatının altında 1.5 * ATR mesafede belirle. Giriş fiyatını belirlerken fiyatın düşebileceği potansiyel dip seviyelerini (SMA-50, PSAR, Fibonacci %38.2, ATR) analiz et, güncel fiyattan direkt giriş önerme, kâr marjını maksimize et. Kısa vadeli (1sa) ve uzun vadeli (1 hafta) destek/direnç noktaları belirle, her direnç noktası aşılırsa olası fiyat hedeflerini ver. Temel analiz için haberlerin ve CoinMarketCal etkinliklerinin pozitif/negatif etkisini vurgula. Konuşma geçmişini dikkate al, samimi sohbet et. Kullanıcı "yeniden analiz yap" demedikçe önbellekteki son analizi kullan, yeni analiz yapma. "Yeniden analiz yap" denirse yeni analiz yap ve önbelleği güncelle. Serbest metin mesajlarında coin adı geçiyorsa analizi veya durumu döndür, yoksa samimi bir şekilde sohbet et.'
+              content: 'Sen bir kripto para analiz botusun, Grok-4-0709 modelini kullanıyorsun. Kısa vadeli zaman dilimlerini (1min, 5min, 30min, 1hour) inceleyip teknik ve temel analize dayalı kısa, samimi, anlaşılır Türkçe yorum yap (maksimum 300 kelime, kelime sayısını yazma). Güncel fiyat (💰), giriş (📉), kısa vadeli çıkış (4-6 saat, 📈), günlük çıkış (24 saat, 📈), haftalık çıkış (1 hafta, 📈), uzun vadeli çıkış (1-2 hafta, 📈) ve stop-loss (🛑) fiyatını giriş fiyatının altında 1.5 * ATR mesafede belirle. Giriş fiyatını belirlerken fiyatın düşebileceği potansiyel dip seviyelerini (SMA-50, PSAR, Fibonacci %38.2, ATR) analiz et, güncel fiyattan direkt giriş önerme, kâr marjını maksimize et. Kısa vadeli (1sa) ve uzun vadeli (1 hafta) destek/direnç noktaları belirle, her direnç noktası aşılırsa olası fiyat hedeflerini ver. Temel analiz için haberlerin ve CoinMarketCal etkinliklerinin pozitif/negatif etkisini vurgula, CoinMarketCal’ı kaynak olarak belirt. Konuşma geçmişini dikkate al, samimi sohbet et. Kullanıcı "yeniden analiz yap" demedikçe önbellekteki son analizi kullan, yeni analiz yapma. "Yeniden analiz yap" denirse yeni analiz yap ve önbelleği güncelle. Serbest metin mesajlarında coin adı geçiyorsa analizi veya durumu döndür, yoksa samimi bir şekilde sohbet et.'
             },
             { role: 'user', content: prompt },
           ],
@@ -242,7 +277,7 @@ async function fetchNews() {
   }
   // CoinMarketCal etkinlikleri
   const { top100 } = await getTopCoinsFromCMCAndCMCal();
-  const events = await fetchTopCoinEvents(top100);
+  const events = await fetchTopCoinEvents();
   news.push(...events.map(e => `${e.coin}: ${e.title} (${e.date})`));
   return news;
 }
@@ -270,7 +305,7 @@ async function fetchCoinMarketCalCoins() {
 async function fetchTopCoinEvents(filter = 'catalyst_events') {
   try {
     const events = await rateLimitedCallCoinMarketCal('https://developers.coinmarketcal.com/v1/events', {
-      max: 50, // Maksimum 50 etkinlik
+      max: 50,
       sortBy: filter,
       showOnly: filter,
       dateRangeStart: new Date().toISOString().split('T')[0],
@@ -279,19 +314,23 @@ async function fetchTopCoinEvents(filter = 'catalyst_events') {
       showViews: true,
       translations: 'tr',
     });
-    console.log('CoinMarketCal raw events:', events); // Ham API yanıtını logla
-    return events
-      .filter(event => event.coin && event.title && typeof event.coin === 'string' && typeof event.title === 'string')
+    console.log('CoinMarketCal etkinlik sayısı:', events.length);
+    const filteredEvents = events
+      .filter(event => event.coins && Array.isArray(event.coins) && event.coins.length > 0 && event.title?.en)
       .map(event => ({
-        coin: event.coin || 'Bilinmiyor',
-        title: event.title || 'Etkinlik başlığı yok',
+        coin: event.coins[0]?.name || 'Bilinmiyor',
+        symbol: event.coins[0]?.symbol || 'Unknown',
+        title: event.title?.en || 'Etkinlik başlığı yok',
         date: event.displayed_date || 'Bilinmiyor',
         impact: event.is_popular || event.catalyst_score > 0 ? 'Positive' : 'Neutral',
         catalystScore: event.catalyst_score || 0,
         viewCount: event.view_count || 0,
         voteCount: event.vote_count || 0,
-        description: event.description || 'Açıklama yok', // Etkinlik açıklamasını ekle
+        description: event.description?.en || 'Açıklama yok',
+        proofLink: event.source || 'Kaynak belirtilmemiş',
       }));
+    console.log('Filtrelenmiş etkinlik sayısı:', filteredEvents.length);
+    return filteredEvents;
   } catch (error) {
     console.error('CoinMarketCal events error:', error.message);
     return [];
@@ -301,9 +340,13 @@ async function fetchTopCoinEvents(filter = 'catalyst_events') {
 // CoinMarketCal etkinliklerini Grok ile yorumlama
 async function analyzeCoinMarketCalEvents(events, chatHistory) {
   try {
-    // Etkinlikleri Grok'a analiz için formatla
+    if (!events.length) {
+      return 'Analiz edilecek etkinlik bulunamadı.';
+    }
+
     const eventSummaries = events.map(event => ({
       coin: event.coin,
+      symbol: event.symbol,
       title: event.title,
       date: event.date,
       impact: event.impact,
@@ -311,11 +354,11 @@ async function analyzeCoinMarketCalEvents(events, chatHistory) {
       viewCount: event.viewCount,
       voteCount: event.voteCount,
       description: event.description,
+      proofLink: event.proofLink,
     }));
 
-    // Grok'a gönderilecek prompt
     const prompt = `
-      Aşağıdaki CoinMarketCal etkinliklerini analiz et ve hangi coinlerin iyi yatırım fırsatları sunduğunu belirle. Her etkinliğin başlığını, açıklamasını, etki derecesini (impact), catalyst skorunu, görüntülenme ve oy sayısını dikkate al. Pozitif etki (impact: Positive) ve yüksek catalyst skoru (örneğin, 5 veya üstü) olan etkinliklere öncelik ver. Ayrıca, popülerlik (viewCount, voteCount) ve açıklamadaki olumlu kelimeleri (örneğin, "lansman", "ortaklık", "listeleme") dikkate alarak hangi coinlerin fiyat artışı potansiyeli taşıdığını değerlendir. Sonuçları kısa ve anlaşılır bir şekilde özetle, her coin için neden fırsat sunduğunu açıkla.
+      Aşağıdaki CoinMarketCal etkinliklerini analiz et ve hangi coinlerin iyi yatırım fırsatları sunduğunu belirle. Her etkinliğin başlığını, açıklamasını, etki derecesini, catalyst skorunu, görüntülenme ve oy sayısını dikkate al. Halving, token yakma, buyback, borsa listelemeleri, AMA’lar veya airdrop gibi etkinliklere öncelik ver. Popülerlik (viewCount, voteCount) ve açıklamadaki olumlu kelimeleri (örneğin, "lansman", "ortaklık", "listeleme") değerlendirerek fiyat artışı potansiyeli taşıyan coin’leri seç. Sonuçları kısa ve anlaşılır bir şekilde özetle, her coin için neden fırsat sunduğunu ve kanıt linkini belirt.
 
       Etkinlikler:
       ${JSON.stringify(eventSummaries, null, 2)}
@@ -323,11 +366,11 @@ async function analyzeCoinMarketCalEvents(events, chatHistory) {
       Çıktı formatı:
       - Coin: [Coin Adı]
         - Fırsat Seviyesi: [Yüksek/Orta/Düşük]
-        - Neden: [Kısa açıklama, örneğin, "Büyük bir borsada listeleme, yüksek catalyst skoru"]
+        - Neden: [Kısa açıklama]
+        - Kanıt: [Proof Link]
     `;
 
-    // Grok API çağrısı (xAI API'sini kullanıyoruz)
-    const grokResponse = await rateLimitedCallGrok(prompt, 300); // 300ms rate limit
+    const grokResponse = await rateLimitedCallGrok(prompt);
     return grokResponse || 'Analiz yapılamadı, lütfen tekrar deneyin.';
   } catch (error) {
     console.error('Grok analiz hatası:', error.message);
@@ -362,13 +405,13 @@ async function getTopCoinsFromCMCAndCMCal() {
     const top100 = await fetchTopCoinsCMC(100, 1);
     const top500 = await fetchTopCoinsCMC(500, 101);
     const cmcCoins = [...top100, ...top500.slice(100)];
-    console.log('CMC Coins:', cmcCoins); // Coin listesini logla
+    console.log('CMC Coins:', cmcCoins.length);
     if (!cmcCoins.length) {
       console.error('No coins fetched from CoinMarketCap');
       return { top100: [], top500: [] };
     }
     const cmcalCoins = await rateLimitedCallCoinMarketCal('https://developers.coinmarketcal.com/v1/coins', {});
-    console.log('CMCal Coins:', cmcalCoins); // CoinMarketCal coinlerini logla
+    console.log('CMCal Coins:', cmcalCoins.length);
     const cmcalCoinSymbols = cmcalCoins.map(coin => coin.symbol.toLowerCase());
     return {
       top100: cmcCoins.filter(coin => cmcalCoinSymbols.includes(coin.symbol.toLowerCase())),
@@ -379,41 +422,61 @@ async function getTopCoinsFromCMCAndCMCal() {
     return { top100: [], top500: [] };
   }
 }
+
 // Fırsat coin’leri bulma
 async function findOpportunityCoins() {
-  const { top100, top500 } = await getTopCoinsFromCMCAndCMCal();
-  const opportunities = [];
+  let events = await loadEventsFromCache();
+  if (!events || events.length === 0) {
+    events = await updateCache();
+  }
 
-  for (const coin of [...top100, ...top500.slice(100)]) {
-    const events = await fetchTopCoinEvents([coin]);
-    const klines = await fetchHttpKlines(`${coin.symbol}-USDT`, '1hour');
+  const opportunities = [];
+  const processedCoins = new Set();
+
+  for (const event of events) {
+    const coin = event.symbol.toUpperCase() + '-USDT';
+    if (processedCoins.has(coin) || !COINS.includes(coin)) continue;
+
+    const klines = await fetchHttpKlines(coin, '1hour');
     const indicators = calculateIndicators(klines);
-    const price = await getCurrentPrice(`${coin.symbol}-USDT`);
+    const price = await getCurrentPrice(coin);
 
     let score = 0;
-    if (events.some(e => e.impact === 'Positive')) score += 50;
-    if (events.some(e => e.catalystScore > 0)) score += 30;
-    if (events.some(e => e.viewCount > 1000)) score += 10;
-    if (events.length > 0) score += 20;
+    if (event.impact === 'Positive') score += 50;
+    if (event.catalystScore > 0) score += event.catalystScore * 5;
+    if (event.viewCount > 1000 || event.voteCount > 500) score += 20;
+    if (event.title.toLowerCase().includes('halving')) score += 40;
+    if (event.title.toLowerCase().includes('burn') || event.description.toLowerCase().includes('burn')) score += 30;
+    if (event.title.toLowerCase().includes('buyback') || event.description.toLowerCase().includes('buyback')) score += 30;
+    if (event.title.toLowerCase().includes('listing')) score += 25;
+    if (event.title.toLowerCase().includes('ama')) score += 20;
+    if (event.description.toLowerCase().includes('airdrop')) score += 20;
 
     if (indicators?.RSI < 30) score += 30;
     if (indicators?.MACD > 0 && indicators.MACD > indicators.signal) score += 20;
-    if (coin.volume24h > coin.marketCap * 0.05) score += 10;
-    if (coin.percentChange7d < -10 && coin.percentChange7d > -30) score += 15;
 
-    if (score > 50) {
+    if (score >= 50) {
       opportunities.push({
-        coin: coin.symbol,
+        coin: event.coin,
+        symbol: event.symbol,
         score,
-        events,
+        event: {
+          title: event.title,
+          date: event.date,
+          impact: event.impact,
+          catalystScore: event.catalystScore,
+          proofLink: event.proofLink,
+          description: event.description,
+        },
         indicators,
         price,
-        marketCap: coin.marketCap,
       });
+      processedCoins.add(coin);
     }
   }
 
-  return opportunities.sort((a, b) => b.score - a.score).slice(0, 10);
+  console.log('Fırsat coin sayısı:', opportunities.length);
+  return opportunities.sort((a, b) => b.score - a.score).slice(0, 5);
 }
 
 // WebSocket for current price
@@ -747,15 +810,29 @@ async function analyzeCoin(coin, btcData = null, news = [], chatHistory = [], fo
 
   const btcIndicators = btcData ? calculateIndicators(btcData) : null;
   const btcStatus = btcIndicators && btcIndicators.EMA50 > btcIndicators.EMA200 ? 'Yükselişte' : 'Düşüşte';
-  const newsSummary = news.length ? news.join('; ') : 'Haber bulunamadı.';
   const atr = calculateATR(klinesResults[SHORT_TIMEFRAMES.indexOf('1hour')]);
+
+  // JSON cache’ten coin’e özel etkinlikleri çek
+  let events = await loadEventsFromCache();
+  if (!events || events.length === 0) {
+    events = await updateCache();
+  }
+  const coinEvents = events.filter(event => 
+    event.symbol.toLowerCase() === coin.split('-')[0].toLowerCase() || 
+    event.coin.toLowerCase() === coin.split('-')[0].toLowerCase()
+  );
+  const eventSummary = coinEvents.length > 0 
+    ? coinEvents.map(e => `${e.title} (${e.date}, Etki: ${e.impact}, Kaynak: CoinMarketCal ${e.proofLink})`).join('; ')
+    : 'CoinMarketCal’da bu coin için etkinlik bulunamadı.';
 
   const prompt = `
     ${coin} için kısa vadeli (1min, 5min, 30min, 1hour) teknik ve temel analiz yap.
     İndikatörler: ${JSON.stringify(indicatorsByTimeframe, null, 2)}.
     Güncel fiyat: ${currentPrice ? currentPrice.toFixed(2) : 'Bilinmiyor'}.
     ATR (1sa): ${atr.toFixed(2)}.
-    BTC durumu: ${btcStatus}, Haberler ve Etkinlikler: ${newsSummary}.
+    BTC durumu: ${btcStatus}.
+    CoinMarketCal Etkinlikleri: ${eventSummary}.
+    Haberler: ${news.length ? news.join('; ') : 'Haber bulunamadı.'}.
     Son 10 konuşma: ${chatHistory.join('; ')}.
     Giriş (📉) fiyatını belirlerken fiyatın düşebileceği potansiyel dip seviyelerini (SMA-50, PSAR, Fibonacci %38.2, ATR) analiz et, güncel fiyattan direkt giriş önerme, kâr marjını maksimize et. 
     Çıkış (📈) için:
@@ -765,10 +842,13 @@ async function analyzeCoin(coin, btcData = null, news = [], chatHistory = [], fo
       - Uzun vadeli (1-2 hafta) hedef ver.
     Stop-loss (🛑) fiyatını giriş fiyatının altında, 1.5 * ATR mesafede belirle.
     Kısa vadeli (1sa) ve uzun vadeli (1 hafta) destek/direnç noktaları belirle. Her direnç noktası aşılırsa olası fiyat hedeflerini ver.
-    Kısa, samimi Türkçe yorum (maksimum 300 kelime, kelime sayısını yazma). Haberlerin ve etkinliklerin pozitif/negatif etkisini vurgula.`;
+    CoinMarketCal etkinliklerini (halving, token yakma, buyback, borsa listelemeleri, AMA’lar) dikkate al ve yorumda bunlara vurgu yap. Kaynak olarak CoinMarketCal’ı belirt. Kısa, samimi Türkçe yorum (maksimum 300 kelime, kelime sayısını yazma).`;
   let comment = await rateLimitedCallGrok(prompt);
   if (!comment) {
     comment = generateFallbackComment(indicatorsByTimeframe, btcStatus, currentPrice, coin, news);
+    comment += `\nKaynak: CoinMarketCal (Etkinlik bulunamadı).`;
+  } else {
+    comment += `\nKaynak: CoinMarketCal (${eventSummary ? 'Etkinlikler işlendi' : 'Etkinlik bulunamadı'}).`;
   }
 
   let dip = currentPrice || 0;
@@ -828,6 +908,7 @@ async function analyzeCoin(coin, btcData = null, news = [], chatHistory = [], fo
     currentPrice,
     yorum: comment,
     indicators: indicatorsByTimeframe,
+    coinMarketCalEvents: coinEvents,
   };
 
   await saveAnalysis(db, { tarih: result.tarih, coin, analiz: JSON.stringify(result.analyses) });
@@ -914,7 +995,9 @@ function getCoinButtons() {
     ]).concat([
       [Markup.button.callback('Alarm Kur', 'alarm_menu')],
       [Markup.button.callback('Bildirimleri Durdur', 'alarm_stop')],
-      [Markup.button.callback('CoinMarketCal Verileri', 'coinmarketcal')]
+      [Markup.button.callback('CoinMarketCal Verileri', 'coinmarketcal')],
+      [Markup.button.callback('CoinMarketCal Güncelle', 'update_coinmarketcal')],
+      [Markup.button.callback('Fırsat Coin’leri', 'opportunities')]
     ]), { columns: 2 }
   );
 }
@@ -964,6 +1047,141 @@ bot.command('alarm_stop', async (ctx) => {
   }
 });
 
+bot.command('coinmarketcal', async (ctx) => {
+  console.log('CoinMarketCal komutu alındı, chat ID:', ctx.chat.id);
+  try {
+    await ctx.reply('CoinMarketCal etkinliklerini çekiyorum, biraz bekle kanka! 😎');
+    let events = await loadEventsFromCache();
+    if (!events || events.length === 0) {
+      events = await updateCache();
+    }
+
+    if (!events.length) {
+      await ctx.reply('CoinMarketCal’dan etkinlik bulunamadı. 😓', getCoinButtons());
+      return;
+    }
+
+    const limitedEvents = events.slice(0, 10);
+    let eventMessage = '📅 CoinMarketCal Etkinlikleri (1 Hafta İçinde):\n';
+    for (const event of limitedEvents) {
+      eventMessage += `\n${event.coin}: ${event.title} (${event.date})\n`;
+      eventMessage += `Etki: ${event.impact}, Catalyst Skor: ${event.catalystScore}\n`;
+      eventMessage += `Açıklama: ${event.description.slice(0, 100)}...\n`;
+      eventMessage += `Kanıt: ${event.proofLink}\n`;
+    }
+
+    const maxMessageLength = 4000;
+    if (eventMessage.length > maxMessageLength) {
+      const messages = [];
+      let currentMessage = '📅 CoinMarketCal Etkinlikleri (1 Hafta İçinde):\n';
+      let currentLength = currentMessage.length;
+
+      for (const event of limitedEvents) {
+        const eventText = `\n${event.coin}: ${event.title} (${event.date})\nEtki: ${event.impact}, Catalyst Skor: ${event.catalystScore}\nAçıklama: ${event.description.slice(0, 100)}...\nKanıt: ${event.proofLink}\n`;
+        if (currentLength + eventText.length > maxMessageLength) {
+          messages.push(currentMessage);
+          currentMessage = '📅 CoinMarketCal Etkinlikleri (Devam):\n';
+          currentLength = currentMessage.length;
+        }
+        currentMessage += eventText;
+        currentLength += eventText.length;
+      }
+      messages.push(currentMessage);
+
+      for (const msg of messages) {
+        await ctx.reply(msg, getCoinButtons());
+        if (ctx.chat.id.toString() === GROUP_ID) {
+          await bot.telegram.sendMessage(GROUP_ID, msg, getCoinButtons());
+        }
+      }
+    } else {
+      await ctx.reply(eventMessage, getCoinButtons());
+      if (ctx.chat.id.toString() === GROUP_ID) {
+        await bot.telegram.sendMessage(GROUP_ID, eventMessage, getCoinButtons());
+      }
+    }
+
+    const chatHistory = await getRecentChatHistory(db, ctx.chat.id.toString());
+    const comment = await analyzeCoinMarketCalEvents(limitedEvents, chatHistory);
+    await ctx.reply(`📝 Grok Fırsat Analizi:\n${comment}`, getCoinButtons());
+    if (ctx.chat.id.toString() === GROUP_ID) {
+      await bot.telegram.sendMessage(GROUP_ID, `📝 Grok Fırsat Analizi:\n${comment}`, getCoinButtons());
+    }
+    await saveChatHistory(db, ctx.chat.id.toString(), 'Komut: coinmarketcal');
+  } catch (error) {
+    console.error('CoinMarketCal komut hatası:', error);
+    await ctx.reply('CoinMarketCal verilerini çekerken hata oluştu, tekrar dene kanka! 😓', getCoinButtons());
+  }
+});
+
+bot.command('opportunities', async (ctx) => {
+  console.log('Opportunities komutu alındı, chat ID:', ctx.chat.id);
+  try {
+    await ctx.reply('Potansiyel coin fırsatlarını tarıyorum, biraz bekle kanka! 😎');
+    const opportunities = await findOpportunityCoins();
+
+    if (!opportunities.length) {
+      await ctx.reply('Şu an yüksek potansiyelli coin bulunamadı. 😓 CoinMarketCal verilerini kontrol et!', getCoinButtons());
+      return;
+    }
+
+    let message = '📈 Potansiyel Fırsat Coin’leri (Kaynak: CoinMarketCal):\n';
+    for (const opp of opportunities) {
+      message += `\n${opp.coin} (${opp.symbol}, Skor: ${opp.score}):\n`;
+      message += `  Güncel Fiyat: 💰 ${opp.price ? opp.price.toFixed(2) : 'Bilinmiyor'}\n`;
+      message += `  Etkinlik: ${opp.event.title} (${opp.event.date})\n`;
+      message += `  Etki: ${opp.event.impact}, Catalyst Skor: ${opp.event.catalystScore}\n`;
+      message += `  Açıklama: ${opp.event.description.slice(0, 100)}...\n`;
+      message += `  Kanıt: ${opp.event.proofLink}\n`;
+      message += `  RSI: ${opp.indicators?.RSI.toFixed(2) || 'Bilinmiyor'}\n`;
+      message += `  MACD: ${opp.indicators?.MACD.toFixed(2) || 'Bilinmiyor'}\n`;
+    }
+
+    const maxMessageLength = 4000;
+    if (message.length > maxMessageLength) {
+      const messages = [];
+      let currentMessage = '📈 Potansiyel Fırsat Coin’leri (Kaynak: CoinMarketCal):\n';
+      let currentLength = currentMessage.length;
+
+      for (const opp of opportunities) {
+        const oppText = `\n${opp.coin} (${opp.symbol}, Skor: ${opp.score}):\n` +
+                        `  Güncel Fiyat: 💰 ${opp.price ? opp.price.toFixed(2) : 'Bilinmiyor'}\n` +
+                        `  Etkinlik: ${opp.event.title} (${opp.event.date})\n` +
+                        `  Etki: ${opp.event.impact}, Catalyst Skor: ${opp.event.catalystScore}\n` +
+                        `  Açıklama: ${opp.event.description.slice(0, 100)}...\n` +
+                        `  Kanıt: ${opp.event.proofLink}\n` +
+                        `  RSI: ${opp.indicators?.RSI.toFixed(2) || 'Bilinmiyor'}\n` +
+                        `  MACD: ${opp.indicators?.MACD.toFixed(2) || 'Bilinmiyor'}\n`;
+        if (currentLength + oppText.length > maxMessageLength) {
+          messages.push(currentMessage);
+          currentMessage = '📈 Potansiyel Fırsat Coin’leri (Devam):\n';
+          currentLength = currentMessage.length;
+        }
+        currentMessage += oppText;
+        currentLength += oppText.length;
+      }
+      messages.push(currentMessage);
+
+      for (const msg of messages) {
+        await ctx.reply(msg, getCoinButtons());
+        if (ctx.chat.id.toString() === GROUP_ID) {
+          await bot.telegram.sendMessage(GROUP_ID, msg, getCoinButtons());
+        }
+      }
+    } else {
+      await ctx.reply(message, getCoinButtons());
+      if (ctx.chat.id.toString() === GROUP_ID) {
+        await bot.telegram.sendMessage(GROUP_ID, message, getCoinButtons());
+      }
+    }
+
+    await saveChatHistory(db, ctx.chat.id.toString(), 'Komut: opportunities');
+  } catch (error) {
+    console.error('Opportunities komut hatası:', error);
+    await ctx.reply('Fırsat coin’leri aranırken hata oluştu, tekrar dene kanka! 😓', getCoinButtons());
+  }
+});
+
 // Inline Actions
 bot.action('alarm_stop', async (ctx) => {
   console.log('Inline alarm stop isteği, chat ID:', ctx.chat.id);
@@ -994,10 +1212,10 @@ bot.action(/analyze_(.+)/, async (ctx) => {
       await ctx.reply('Geçerli bir coin seç kanka! 😊', getCoinButtons());
       return;
     }
-    const news = await fetchNews();
-    const chatHistory = await getRecentChatHistory(db, ctx.chat.id.toString());
     await ctx.reply(`${coin.split('-')[0]}’yı analiz ediyorum, biraz bekle! 😎`);
 
+    const news = await fetchNews();
+    const chatHistory = await getRecentChatHistory(db, ctx.chat.id.toString());
     const cachedAnalysis = await getCachedAnalysis(db, coin);
     let analysis;
     if (cachedAnalysis) {
@@ -1135,37 +1353,37 @@ bot.action(/alarm_(.+)/, async (ctx) => {
   }
 });
 
-// Yeni Inline Buton: CoinMarketCal Verileri
 bot.action('coinmarketcal', async (ctx) => {
   console.log('Inline CoinMarketCal isteği, chat ID:', ctx.chat.id);
   try {
     await ctx.reply('CoinMarketCal etkinliklerini çekiyorum, biraz bekle kanka! 😎');
-    const events = await fetchTopCoinEvents('catalyst_events');
-    const chatHistory = await getRecentChatHistory(db, ctx.chat.id.toString());
+    let events = await loadEventsFromCache();
+    if (!events || events.length === 0) {
+      events = await updateCache();
+    }
 
     if (!events.length) {
       await ctx.reply('CoinMarketCal’dan etkinlik bulunamadı. 😓', getCoinButtons());
       return;
     }
 
-    // İlk 10 etkinliği al
     const limitedEvents = events.slice(0, 10);
     let eventMessage = '📅 CoinMarketCal Etkinlikleri (1 Hafta İçinde):\n';
     for (const event of limitedEvents) {
       eventMessage += `\n${event.coin}: ${event.title} (${event.date})\n`;
       eventMessage += `Etki: ${event.impact}, Catalyst Skor: ${event.catalystScore}\n`;
-      eventMessage += `Görüntülenme: ${event.viewCount}, Oy: ${event.voteCount}\n`;
+      eventMessage += `Açıklama: ${event.description.slice(0, 100)}...\n`;
+      eventMessage += `Kanıt: ${event.proofLink}\n`;
     }
 
-    // Mesajı parçalara böl
-    const maxMessageLength = 4000; // Telegram mesaj sınırı
+    const maxMessageLength = 4000;
     if (eventMessage.length > maxMessageLength) {
       const messages = [];
       let currentMessage = '📅 CoinMarketCal Etkinlikleri (1 Hafta İçinde):\n';
       let currentLength = currentMessage.length;
 
       for (const event of limitedEvents) {
-        const eventText = `\n${event.coin}: ${event.title} (${event.date})\nEtki: ${event.impact}, Catalyst Skor: ${event.catalystScore}\nGörüntülenme: ${event.viewCount}, Oy: ${event.voteCount}\n`;
+        const eventText = `\n${event.coin}: ${event.title} (${event.date})\nEtki: ${event.impact}, Catalyst Skor: ${event.catalystScore}\nAçıklama: ${event.description.slice(0, 100)}...\nKanıt: ${event.proofLink}\n`;
         if (currentLength + eventText.length > maxMessageLength) {
           messages.push(currentMessage);
           currentMessage = '📅 CoinMarketCal Etkinlikleri (Devam):\n';
@@ -1189,9 +1407,9 @@ bot.action('coinmarketcal', async (ctx) => {
       }
     }
 
-    // Grok ile analiz
+    const chatHistory = await getRecentChatHistory(db, ctx.chat.id.toString());
     const comment = await analyzeCoinMarketCalEvents(limitedEvents, chatHistory);
-    await ctx.reply(`📝 Grok Fırsat Analizi:\n${comment}`, getCoinButtons());
+        await ctx.reply(`📝 Grok Fırsat Analizi:\n${comment}`, getCoinButtons());
     if (ctx.chat.id.toString() === GROUP_ID) {
       await bot.telegram.sendMessage(GROUP_ID, `📝 Grok Fırsat Analizi:\n${comment}`, getCoinButtons());
     }
@@ -1199,6 +1417,69 @@ bot.action('coinmarketcal', async (ctx) => {
   } catch (error) {
     console.error('Inline CoinMarketCal error:', error);
     await ctx.reply('CoinMarketCal verilerini çekerken hata oluştu, tekrar dene kanka! 😓', getCoinButtons());
+  }
+});
+
+bot.action('update_coinmarketcal', async (ctx) => {
+  console.log('Inline CoinMarketCal güncelleme isteği, chat ID:', ctx.chat.id);
+  try {
+    await ctx.reply('CoinMarketCal verilerini güncelliyorum, biraz bekle kanka! 😎');
+    const events = await updateCache();
+    if (!events.length) {
+      await ctx.reply('CoinMarketCal’dan yeni etkinlik bulunamadı. 😓', getCoinButtons());
+      return;
+    }
+
+    const limitedEvents = events.slice(0, 10);
+    let eventMessage = '📅 Güncellenmiş CoinMarketCal Etkinlikleri (1 Hafta İçinde):\n';
+    for (const event of limitedEvents) {
+      eventMessage += `\n${event.coin}: ${event.title} (${event.date})\n`;
+      eventMessage += `Etki: ${event.impact}, Catalyst Skor: ${event.catalystScore}\n`;
+      eventMessage += `Açıklama: ${event.description.slice(0, 100)}...\n`;
+      eventMessage += `Kanıt: ${event.proofLink}\n`;
+    }
+
+    const maxMessageLength = 4000;
+    if (eventMessage.length > maxMessageLength) {
+      const messages = [];
+      let currentMessage = '📅 Güncellenmiş CoinMarketCal Etkinlikleri (1 Hafta İçinde):\n';
+      let currentLength = currentMessage.length;
+
+      for (const event of limitedEvents) {
+        const eventText = `\n${event.coin}: ${event.title} (${event.date})\nEtki: ${event.impact}, Catalyst Skor: ${event.catalystScore}\nAçıklama: ${event.description.slice(0, 100)}...\nKanıt: ${event.proofLink}\n`;
+        if (currentLength + eventText.length > maxMessageLength) {
+          messages.push(currentMessage);
+          currentMessage = '📅 Güncellenmiş CoinMarketCal Etkinlikleri (Devam):\n';
+          currentLength = currentMessage.length;
+        }
+        currentMessage += eventText;
+        currentLength += eventText.length;
+      }
+      messages.push(currentMessage);
+
+      for (const msg of messages) {
+        await ctx.reply(msg, getCoinButtons());
+        if (ctx.chat.id.toString() === GROUP_ID) {
+          await bot.telegram.sendMessage(GROUP_ID, msg, getCoinButtons());
+        }
+      }
+    } else {
+      await ctx.reply(eventMessage, getCoinButtons());
+      if (ctx.chat.id.toString() === GROUP_ID) {
+        await bot.telegram.sendMessage(GROUP_ID, eventMessage, getCoinButtons());
+      }
+    }
+
+    const chatHistory = await getRecentChatHistory(db, ctx.chat.id.toString());
+    const comment = await analyzeCoinMarketCalEvents(limitedEvents, chatHistory);
+    await ctx.reply(`📝 Grok Fırsat Analizi:\n${comment}`, getCoinButtons());
+    if (ctx.chat.id.toString() === GROUP_ID) {
+      await bot.telegram.sendMessage(GROUP_ID, `📝 Grok Fırsat Analizi:\n${comment}`, getCoinButtons());
+    }
+    await saveChatHistory(db, ctx.chat.id.toString(), 'Inline: update_coinmarketcal');
+  } catch (error) {
+    console.error('Inline CoinMarketCal update error:', error);
+    await ctx.reply('CoinMarketCal güncellenirken hata oluştu, tekrar dene kanka! 😓', getCoinButtons());
   }
 });
 
@@ -1285,186 +1566,229 @@ bot.on('text', async (ctx) => {
     }
     return;
   }
-if (selectedCoin && message.includes('alarm kur')) {
-  try {
-    await ctx.reply(`📢 ${selectedCoin.split('-')[0]} için alarm fiyatını yaz (ör. 330.50):`, {
-      reply_markup: { force_reply: true }
-    });
-    bot.hears(/^\d*\.?\d+$/, async (ctx) => {
-      const price = parseFloat(ctx.message.text);
-      if (isNaN(price) || price <= 0) {
-        await ctx.reply('Geçerli bir fiyat gir kanka (ör. 330.50)! 😊', getCoinButtons());
+
+  if (selectedCoin && message.includes('alarm kur')) {
+    try {
+      await ctx.reply(`📢 ${selectedCoin.split('-')[0]} için alarm fiyatını yaz (ör. 330.50):`, {
+        reply_markup: { force_reply: true }
+      });
+      bot.hears(/^\d*\.?\d+$/, async (ctx) => {
+        const price = parseFloat(ctx.message.text);
+        if (isNaN(price) || price <= 0) {
+          await ctx.reply('Geçerli bir fiyat gir kanka (ör. 330.50)! 😊', getCoinButtons());
+          return;
+        }
+        try {
+          const alarmKey = `${selectedCoin}-${ctx.chat.id}`;
+          priceAlarms.set(alarmKey, { chatId: ctx.chat.id.toString(), targetPrice: price });
+          console.log(`Alarm kaydedildi: ${alarmKey}, Fiyat: ${price}`);
+
+          const { stop } = await startWebSocket(selectedCoin, price, ctx.chat.id, async ({ price: currentPrice }) => {
+            if (Math.abs(currentPrice - price) <= 0.01 * price) {
+              try {
+                const news = await fetchNews();
+                const chatHistory = await getRecentChatHistory(db, ctx.chat.id.toString());
+                const cachedAnalysis = await getCachedAnalysis(db, selectedCoin);
+                let analysis;
+                if (cachedAnalysis) {
+                  analysis = { coin: selectedCoin, tarih: cachedAnalysis.tarih, analyses: cachedAnalysis };
+                } else {
+                  analysis = await analyzeCoin(selectedCoin, null, news, chatHistory);
+                }
+                const messageId = `${selectedCoin}-${analysis.tarih}`;
+                if (sentMessages.has(messageId)) return;
+                sentMessages.add(messageId);
+
+                let message = `Alarm: ${selectedCoin.split('-')[0]} ${currentPrice.toFixed(2)}'e ${currentPrice <= price ? 'düştü' : 'çıktı'}! 🚨\n`;
+                message += `${selectedCoin} Analizi (${new Date(analysis.tarih).toLocaleString('tr-TR')}):\n`;
+                message += `  Güncel Fiyat: 💰 ${analysis.analyses.currentPrice ? analysis.analyses.currentPrice.toFixed(2) : 'Bilinmiyor'}\n`;
+                message += `  Giriş: 📉 ${analysis.analyses.giriş.toFixed(2)}\n`;
+                message += `  Kısa Vadeli Çıkış (4-6 saat): 📈 ${analysis.analyses.shortTermÇıkış.toFixed(2)}\n`;
+                message += `  Günlük Çıkış (24 saat): 📈 ${analysis.analyses.dailyÇıkış.toFixed(2)}\n`;
+                message += `  Haftalık Çıkış (1 hafta): 📈 ${analysis.analyses.weeklyÇıkış.toFixed(2)}\n`;
+                message += `  Uzun Vadeli Çıkış (1-2 hafta): 📈 ${analysis.analyses.longTermÇıkış.toFixed(2)}\n`;
+                message += `  Stop-Loss: 🛑 ${analysis.analyses.stopLoss.toFixed(2)}\n`;
+                message += `  Kısa Vadeli Destek (1sa): ${analysis.analyses.shortTermSupport.toFixed(2)}\n`;
+                message += `  Kısa Vadeli Direnç (1sa): ${analysis.analyses.shortTermResistance.toFixed(2)} (Aşılırsa Hedef: ${analysis.analyses.shortTermResistanceTarget.toFixed(2)})\n`;
+                message += `  Uzun Vadeli Destek (1hf): ${analysis.analyses.longTermSupport.toFixed(2)}\n`;
+                message += `  Uzun Vadeli Direnç (1hf): ${analysis.analyses.longTermResistance.toFixed(2)} (Aşılırsa Hedef: ${analysis.analyses.longTermResistanceTarget.toFixed(2)})\n`;
+                message += `  Yorum: ${analysis.analyses.yorum}\n`;
+                await ctx.reply(message, getCoinButtons());
+                if (ctx.chat.id.toString() === GROUP_ID) {
+                  await bot.telegram.sendMessage(GROUP_ID, message, getCoinButtons());
+                }
+                await bot.telegram.sendMessage('1616739367', message, getCoinButtons());
+                priceAlarms.delete(alarmKey);
+                stop();
+              } catch (error) {
+                console.error('Alarm bildirim hatası:', error);
+                await ctx.reply(`Alarm: ${selectedCoin.split('-')[0]} ${currentPrice.toFixed(2)}'e ulaştı, ancak analiz alınamadı. 😓`, getCoinButtons());
+                priceAlarms.delete(alarmKey);
+                stop();
+              }
+            }
+          });
+
+          await ctx.reply(`${selectedCoin.split('-')[0]} için ${price.toFixed(2)} alarmı kuruldu. 🔔`, getCoinButtons());
+          await saveChatHistory(db, ctx.chat.id.toString(), `Text: alarm_${selectedCoin}_${price}`);
+        } catch (error) {
+          console.error('Text alarm set error:', error);
+          await ctx.reply('Alarm kurarken hata oluştu, butonlardan dene kanka! 😓', getCoinButtons());
+        }
+      });
+      await saveChatHistory(db, ctx.chat.id.toString(), `Text: alarm_${selectedCoin}`);
+    } catch (error) {
+      console.error('Text alarm error:', error);
+      await ctx.reply('Alarm kurma sırasında hata oluştu, butonlardan dene kanka! 😓', getCoinButtons());
+    }
+    return;
+  }
+
+  if (message.includes('değerlenecek coin') || message.includes('fırsat coin') || message.includes('yükselir mi')) {
+    try {
+      await ctx.reply('Potansiyel coin fırsatlarını tarıyorum, biraz bekle kanka! 😎');
+      const opportunities = await findOpportunityCoins();
+
+      if (!opportunities.length) {
+        await ctx.reply('Şu an yüksek potansiyelli coin bulunamadı. 😓 CoinMarketCal verilerini kontrol et!', getCoinButtons());
         return;
       }
-      try {
-        const alarmKey = `${selectedCoin}-${ctx.chat.id}`;
-        priceAlarms.set(alarmKey, { chatId: ctx.chat.id.toString(), targetPrice: price });
-        console.log(`Alarm kaydedildi: ${alarmKey}, Fiyat: ${price}`);
 
-        const { stop } = await startWebSocket(selectedCoin, price, ctx.chat.id, async ({ price: currentPrice }) => {
-          if (Math.abs(currentPrice - price) <= 0.01 * price) {
-            try {
-              const news = await fetchNews();
-              const chatHistory = await getRecentChatHistory(db, ctx.chat.id.toString());
-              const cachedAnalysis = await getCachedAnalysis(db, selectedCoin);
-              let analysis;
-              if (cachedAnalysis) {
-                analysis = { coin: selectedCoin, tarih: cachedAnalysis.tarih, analyses: cachedAnalysis };
-              } else {
-                // Kaldığın yer burası, buradan devam
-                analysis = await analyzeCoin(selectedCoin, null, news, chatHistory);
-              }
-              const messageId = `${selectedCoin}-${analysis.tarih}`;
-              if (sentMessages.has(messageId)) return;
-              sentMessages.add(messageId);
-
-              let message = `Alarm: ${selectedCoin.split('-')[0]} ${currentPrice.toFixed(2)}'e ${currentPrice <= price ? 'düştü' : 'çıktı'}! 🚨\n`;
-              message += `${selectedCoin} Analizi (${new Date(analysis.tarih).toLocaleString('tr-TR')}):\n`;
-              message += `  Güncel Fiyat: 💰 ${analysis.analyses.currentPrice ? analysis.analyses.currentPrice.toFixed(2) : 'Bilinmiyor'}\n`;
-              message += `  Giriş: 📉 ${analysis.analyses.giriş.toFixed(2)}\n`;
-              message += `  Kısa Vadeli Çıkış (4-6 saat): 📈 ${analysis.analyses.shortTermÇıkış.toFixed(2)}\n`;
-              message += `  Günlük Çıkış (24 saat): 📈 ${analysis.analyses.dailyÇıkış.toFixed(2)}\n`;
-              message += `  Haftalık Çıkış (1 hafta): 📈 ${analysis.analyses.weeklyÇıkış.toFixed(2)}\n`;
-              message += `  Uzun Vadeli Çıkış (1-2 hafta): 📈 ${analysis.analyses.longTermÇıkış.toFixed(2)}\n`;
-              message += `  Stop-Loss: 🛑 ${analysis.analyses.stopLoss.toFixed(2)}\n`;
-              message += `  Kısa Vadeli Destek (1sa): ${analysis.analyses.shortTermSupport.toFixed(2)}\n`;
-              message += `  Kısa Vadeli Direnç (1sa): ${analysis.analyses.shortTermResistance.toFixed(2)} (Aşılırsa Hedef: ${analysis.analyses.shortTermResistanceTarget.toFixed(2)})\n`;
-              message += `  Uzun Vadeli Destek (1hf): ${analysis.analyses.longTermSupport.toFixed(2)}\n`;
-              message += `  Uzun Vadeli Direnç (1hf): ${analysis.analyses.longTermResistance.toFixed(2)} (Aşılırsa Hedef: ${analysis.analyses.longTermResistanceTarget.toFixed(2)})\n`;
-              message += `  Yorum: ${analysis.analyses.yorum}\n`;
-              await ctx.reply(message, getCoinButtons());
-              if (ctx.chat.id.toString() === GROUP_ID) {
-                await bot.telegram.sendMessage(GROUP_ID, message, getCoinButtons());
-              }
-              await bot.telegram.sendMessage('1616739367', message, getCoinButtons());
-              priceAlarms.delete(alarmKey);
-              stop();
-            } catch (error) {
-              console.error('Alarm bildirim hatası:', error);
-              await ctx.reply(`Alarm: ${selectedCoin.split('-')[0]} ${currentPrice.toFixed(2)}'e ulaştı, ancak analiz alınamadı. 😓`, getCoinButtons());
-              priceAlarms.delete(alarmKey);
-              stop();
-            }
-          }
-        });
-
-        await ctx.reply(`${selectedCoin.split('-')[0]} için ${price.toFixed(2)} alarmı kuruldu. 🔔`, getCoinButtons());
-        await saveChatHistory(db, ctx.chat.id.toString(), `Text: alarm_${selectedCoin}_${price}`);
-      } catch (error) {
-        console.error('Text alarm set error:', error);
-        await ctx.reply('Alarm kurarken hata oluştu, butonlardan dene kanka! 😓', getCoinButtons());
+      let response = '📈 Potansiyel Fırsat Coin’leri (Kaynak: CoinMarketCal):\n';
+      for (const opp of opportunities) {
+        response += `\n${opp.coin} (${opp.symbol}, Skor: ${opp.score}):\n`;
+        response += `  Güncel Fiyat: 💰 ${opp.price ? opp.price.toFixed(2) : 'Bilinmiyor'}\n`;
+        response += `  Etkinlik: ${opp.event.title} (${opp.event.date})\n`;
+        response += `  Etki: ${opp.event.impact}, Catalyst Skor: ${opp.event.catalystScore}\n`;
+        response += `  Açıklama: ${opp.event.description.slice(0, 100)}...\n`;
+        response += `  Kanıt: ${opp.event.proofLink}\n`;
+        response += `  RSI: ${opp.indicators?.RSI.toFixed(2) || 'Bilinmiyor'}\n`;
+        response += `  MACD: ${opp.indicators?.MACD.toFixed(2) || 'Bilinmiyor'}\n`;
       }
-    });
-    await saveChatHistory(db, ctx.chat.id.toString(), `Text: alarm_${selectedCoin}`);
-  } catch (error) {
-    console.error('Text alarm error:', error);
-    await ctx.reply('Alarm kurma sırasında hata oluştu, butonlardan dene kanka! 😓', getCoinButtons());
-  }
-  return;
-}
 
-try {
-  const prompt = `Kullanıcı mesajı: "${message}". Samimi, Türkçe, kısa bir yanıt ver (maksimum 100 kelime). Kripto para konseptine uygun, trader’lara hitap eden bir üslup kullan. Coin veya analizle ilgili değilse, genel bir sohbet tarzında cevap ver ve kullanıcıyı butonlara yönlendir. Son 10 konuşma: ${chatHistory.join('; ')}.`;
-  let response = await rateLimitedCallGrok(prompt);
-  if (!response) {
-    response = 'Kanka, neyi kastediyorsun tam anlamadım! 😅 Coin analizi, durum veya CoinMarketCal verileri için butonları kullan, hemen bakalım! 🚀';
+      const maxMessageLength = 4000;
+      if (response.length > maxMessageLength) {
+        const messages = [];
+        let currentMessage = '📈 Potansiyel Fırsat Coin’leri (Kaynak: CoinMarketCal):\n';
+        let currentLength = currentMessage.length;
+
+        for (const opp of opportunities) {
+          const oppText = `\n${opp.coin} (${opp.symbol}, Skor: ${opp.score}):\n` +
+                          `  Güncel Fiyat: 💰 ${opp.price ? opp.price.toFixed(2) : 'Bilinmiyor'}\n` +
+                          `  Etkinlik: ${opp.event.title} (${opp.event.date})\n` +
+                          `  Etki: ${opp.event.impact}, Catalyst Skor: ${opp.event.catalystScore}\n` +
+                          `  Açıklama: ${opp.event.description.slice(0, 100)}...\n` +
+                          `  Kanıt: ${opp.event.proofLink}\n` +
+                          `  RSI: ${opp.indicators?.RSI.toFixed(2) || 'Bilinmiyor'}\n` +
+                          `  MACD: ${opp.indicators?.MACD.toFixed(2) || 'Bilinmiyor'}\n`;
+          if (currentLength + oppText.length > maxMessageLength) {
+            messages.push(currentMessage);
+            currentMessage = '📈 Potansiyel Fırsat Coin’leri (Devam):\n';
+            currentLength = currentMessage.length;
+          }
+          currentMessage += oppText;
+          currentLength += oppText.length;
+        }
+        messages.push(currentMessage);
+
+        for (const msg of messages) {
+          await ctx.reply(msg, getCoinButtons());
+          if (ctx.chat.id.toString() === GROUP_ID) {
+            await bot.telegram.sendMessage(GROUP_ID, msg, getCoinButtons());
+          }
+        }
+      } else {
+        await ctx.reply(response, getCoinButtons());
+        if (ctx.chat.id.toString() === GROUP_ID) {
+          await bot.telegram.sendMessage(GROUP_ID, response, getCoinButtons());
+        }
+      }
+
+      await saveChatHistory(db, ctx.chat.id.toString(), 'Text: opportunities');
+    } catch (error) {
+      console.error('Text opportunities error:', error);
+      await ctx.reply('Fırsat coin’leri aranırken hata oluştu, butonlardan dene kanka! 😓', getCoinButtons());
+    }
+    return;
   }
-  await ctx.reply(response, getCoinButtons());
-} catch (error) {
-  console.error('Text chat error:', error);
-  await ctx.reply('Bir şeyler ters gitti kanka, butonlarla dene istersen! 😓', getCoinButtons());
-}
+
+  try {
+    const prompt = `Kullanıcı mesajı: "${message}". Samimi, Türkçe, kısa bir yanıt ver (maksimum 100 kelime). Kripto para konseptine uygun, trader’lara hitap eden bir üslup kullan. Coin veya analizle ilgili değilse, genel bir sohbet tarzında cevap ver ve kullanıcıyı butonlara yönlendir. Son 10 konuşma: ${chatHistory.join('; ')}.`;
+    let response = await rateLimitedCallGrok(prompt);
+    if (!response) {
+      response = 'Kanka, neyi kastediyorsun tam anlamadım! 😅 Coin analizi, durum veya CoinMarketCal verileri için butonları kullan, hemen bakalım! 🚀';
+    }
+    await ctx.reply(response, getCoinButtons());
+  } catch (error) {
+    console.error('Text chat error:', error);
+    await ctx.reply('Bir şeyler ters gitti kanka, butonlarla dene istersen! 😓', getCoinButtons());
+  }
 });
 
-// Bitcoin Minute-by-Minute Monitoring
-async function monitorBitcoinPrice() {
+// Bitcoin Price Monitoring
+async function startBitcoinPriceMonitoring() {
   const coin = 'BTC-USDT';
-  try {
-    const now = Date.now();
-    if (isBitcoinMonitoringPaused && now < pauseEndTime) {
-      console.log(`Bitcoin izleme durdurulmuş, kalan süre: ${(pauseEndTime - now) / 1000 / 60} dakika`);
+  console.log('Bitcoin fiyat izleme başlatılıyor...');
+
+  const { stop } = await startWebSocket(coin, 0, GROUP_ID, async ({ price: currentPrice }) => {
+    if (isBitcoinMonitoringPaused && Date.now() < pauseEndTime) {
+      console.log('Bitcoin izleme durduruldu, kalan süre:', (pauseEndTime - Date.now()) / 1000 / 60, 'dakika');
       return;
-    } else if (isBitcoinMonitoringPaused && now >= pauseEndTime) {
+    }
+    if (isBitcoinMonitoringPaused && Date.now() >= pauseEndTime) {
       isBitcoinMonitoringPaused = false;
+      pauseEndTime = 0;
       console.log('Bitcoin izleme yeniden başlatıldı.');
     }
 
-    const currentPrice = await getKucoinWebSocketPrice(coin);
-    if (!currentPrice) {
-      console.error('Bitcoin fiyatı alınamadı.');
-      return;
-    }
-
-    const priceChange = lastBitcoinSignal.price ? (lastBitcoinSignal.price - currentPrice) / lastBitcoinSignal.price : 0;
-    lastBitcoinSignal.price = currentPrice;
-
-    const endAt = Math.floor(Date.now() / 1000);
-    const startAt = endAt - 24 * 60 * 60;
-    const klinesPromises = SHORT_TIMEFRAMES.map(timeframe => fetchHttpKlines(coin, timeframe, startAt, endAt));
-    const klinesResults = await Promise.all(klinesPromises);
-    const indicatorsByTimeframe = {};
-
-    for (let i = 0; i < SHORT_TIMEFRAMES.length; i++) {
-      const timeframe = SHORT_TIMEFRAMES[i];
-      const data = klinesResults[i];
-      if (!data.length) continue;
-
-      const indicators = calculateIndicators(data);
-      if (indicators) indicatorsByTimeframe[timeframe] = indicators;
-    }
-
-    const news = await fetchNews();
-    const negativeNews = news.some(n => n.toLowerCase().includes('düşüş') || n.toLowerCase().includes('hack') || n.toLowerCase().includes('kriz') || n.toLowerCase().includes('bearish'));
-
-    let negativeSignals = 0;
-    let signalType = '';
-    const validIndicators = Object.values(indicatorsByTimeframe).filter(ind => ind !== null);
-    for (const timeframe of SHORT_TIMEFRAMES) {
-      const indicators = indicatorsByTimeframe[timeframe];
-      if (!indicators) continue;
-
-      if (indicators.RSI < 30 && indicators.MACD < indicators.signal && indicators.StochRSI < 20) {
-        negativeSignals++;
+    try {
+      const btcData = await fetchHttpKlines(coin, '1hour', Math.floor(Date.now() / 1000) - 24 * 60 * 60, Math.floor(Date.now() / 1000));
+      const indicators = calculateIndicators(btcData);
+      if (!indicators) {
+        console.log('BTC indikatörleri hesaplanamadı.');
+        return;
       }
-    }
 
-    if (negativeSignals >= 2 && priceChange > 0.05 && negativeNews) {
-      signalType = 'Düşüş';
-    } else {
-      signalType = 'Nötr';
-    }
+      const signalType = indicators.MACD > indicators.signal ? 'buy' : indicators.MACD < indicators.signal ? 'sell' : null;
+      if (!signalType) return;
 
-    if (signalType === lastBitcoinSignal.type && (now - lastBitcoinSignal.timestamp) < BITCOIN_SIGNAL_COOLDOWN) {
-      console.log(`Aynı Bitcoin sinyali, soğuma süresi: ${(BITCOIN_SIGNAL_COOLDOWN - (now - lastBitcoinSignal.timestamp)) / 1000 / 60} dakika`);
-      return;
-    }
+      if (lastBitcoinSignal.type === signalType && Date.now() - lastBitcoinSignal.timestamp < BITCOIN_SIGNAL_COOLDOWN) {
+        console.log(`Aynı Bitcoin sinyali (${signalType}) için soğuma süresi devam ediyor.`);
+        return;
+      }
 
-    if (signalType === 'Düşüş') {
+      if (lastBitcoinSignal.price && Math.abs(currentPrice - lastBitcoinSignal.price) / lastBitcoinSignal.price < 0.01) {
+        console.log('Bitcoin fiyat değişikliği %1’den az, sinyal gönderilmedi.');
+        return;
+      }
+
+      const news = await fetchNews();
       const chatHistory = await getRecentChatHistory(db, GROUP_ID);
-      const analysis = await analyzeCoin(coin, klinesResults[SHORT_TIMEFRAMES.indexOf('1hour')], news, chatHistory);
+      const analysis = await analyzeCoin(coin, btcData, news, chatHistory);
       const messageId = `${coin}-${analysis.tarih}`;
       if (sentMessages.has(messageId)) return;
       sentMessages.add(messageId);
 
-      let message = `🚨 Bitcoin Düşüş Sinyali! (${new Date().toLocaleString('tr-TR')}):\n`;
-      message += `  Güncel Fiyat: 💰 ${analysis.analyses.currentPrice ? analysis.analyses.currentPrice.toFixed(2) : 'Bilinmiyor'}\n`;
-      message += `  Tahmini Dip: 📉 ${analysis.analyses.giriş.toFixed(2)}\n`;
-      message += `  Stop-Loss: 🛑 ${analysis.analyses.stopLoss.toFixed(2)}\n`;
-      message += `  Kısa Vadeli Destek (1sa): ${analysis.analyses.shortTermSupport.toFixed(2)}\n`;
-      message += `  Kısa Vadeli Direnç (1sa): ${analysis.analyses.shortTermResistance.toFixed(2)} (Aşılırsa Hedef: ${analysis.analyses.shortTermResistanceTarget.toFixed(2)})\n`;
-      message += `  Yorum: ${analysis.analyses.yorum}\n`;
-      message += `  Haberler: ${negativeNews ? 'Olumsuz haberler var, dikkat!' : 'Piyasa nötr.'}\n`;
+      let message = `Bitcoin Sinyali (${new Date().toLocaleString('tr-TR')}):\n`;
+      message += `  Güncel Fiyat: 💰 ${currentPrice.toFixed(2)} USDT\n`;
+      message += `  MACD: ${indicators.MACD.toFixed(2)}, Sinyal: ${indicators.signal.toFixed(2)}\n`;
+      message += `  Öneri: ${signalType === 'buy' ? 'Alım 📈' : 'Satış 📉'}\n`;
+      message += `  Analiz: ${analysis.analyses.yorum}\n`;
+
+      lastBitcoinSignal.type = signalType;
+      lastBitcoinSignal.timestamp = Date.now();
+      lastBitcoinSignal.price = currentPrice;
+      lastBitcoinSignal.comment = analysis.analyses.yorum;
 
       await bot.telegram.sendMessage(GROUP_ID, message, getCoinButtons());
       await bot.telegram.sendMessage('1616739367', message, getCoinButtons());
-      lastBitcoinSignal.type = signalType;
-      lastBitcoinSignal.timestamp = now;
-      lastBitcoinSignal.comment = message;
-      console.log('Bitcoin düşüş sinyali gönderildi:', message);
+      console.log('Bitcoin sinyali gönderildi:', signalType);
+    } catch (error) {
+      console.error('Bitcoin sinyal hatası:', error);
     }
-  } catch (error) {
-    console.error('Bitcoin izleme hatası:', error);
-  }
+  });
+
+  return stop;
 }
 
 // Cache Cleanup
@@ -1482,59 +1806,85 @@ setInterval(() => {
 async function startBot() {
   if (isBotStarted) return;
   isBotStarted = true;
-  console.log('Bot başlatılıyor...');
 
-  // Bitcoin izleme her dakika
-  schedule.scheduleJob('*/1 * * * *', async () => {
-    console.log('Bitcoin izleme çalışıyor...');
-    await monitorBitcoinPrice();
-  });
+  try {
+    await bot.telegram.setWebhook('');
+    await bot.launch();
+    console.log('Bot başlatıldı.');
 
-  // Günlük fırsat coin’leri
-  schedule.scheduleJob('0 8 * * *', async () => {
-    console.log('Günlük fırsat coin’leri kontrol ediliyor...');
-    try {
-      const opportunities = await findOpportunityCoins();
-      if (opportunities.length === 0) {
-        await bot.telegram.sendMessage(GROUP_ID, 'Bugün için fırsat coin’i bulunamadı kanka! 😓', getCoinButtons());
-        return;
+    // Günlük analiz görevi
+    schedule.scheduleJob('0 8 * * *', async () => {
+      console.log('Günlük fırsat coin’leri ve CoinMarketCal cache kontrol ediliyor...');
+      try {
+        // Cache’i güncelle
+        const events = await updateCache();
+        if (events.length === 0) {
+          await bot.telegram.sendMessage(GROUP_ID, 'Bugün için CoinMarketCal etkinliği bulunamadı kanka! 😓', getCoinButtons());
+          await bot.telegram.sendMessage('1616739367', 'Bugün için CoinMarketCal etkinliği bulunamadı kanka! 😓', getCoinButtons());
+        } else {
+          const limitedEvents = events.slice(0, 10);
+          let eventMessage = '📅 Günlük CoinMarketCal Etkinlikleri:\n';
+          for (const event of limitedEvents) {
+            eventMessage += `\n${event.coin}: ${event.title} (${event.date})\n`;
+            eventMessage += `Etki: ${event.impact}, Catalyst Skor: ${event.catalystScore}\n`;
+            eventMessage += `Açıklama: ${event.description.slice(0, 100)}...\n`;
+            eventMessage += `Kanıt: ${event.proofLink}\n`;
+          }
+          await bot.telegram.sendMessage(GROUP_ID, eventMessage, getCoinButtons());
+          await bot.telegram.sendMessage('1616739367', eventMessage, getCoinButtons());
+
+          const chatHistory = await getRecentChatHistory(db, GROUP_ID);
+          const comment = await analyzeCoinMarketCalEvents(limitedEvents, chatHistory);
+          await bot.telegram.sendMessage(GROUP_ID, `📝 Grok Fırsat Analizi:\n${comment}`, getCoinButtons());
+          await bot.telegram.sendMessage('1616739367', `📝 Grok Fırsat Analizi:\n${comment}`, getCoinButtons());
+        }
+
+        // Fırsat coinleri kontrolü
+        const opportunities = await findOpportunityCoins();
+        if (opportunities.length === 0) {
+          await bot.telegram.sendMessage(GROUP_ID, 'Bugün için fırsat coin’i bulunamadı kanka! 😓', getCoinButtons());
+          await bot.telegram.sendMessage('1616739367', 'Bugün için fırsat coin’i bulunamadı kanka! 😓', getCoinButtons());
+          return;
+        }
+
+        let message = '📈 Günlük Fırsat Coin’leri (Kaynak: CoinMarketCal):\n';
+        for (const opp of opportunities) {
+          message += `\n${opp.coin} (${opp.symbol}, Skor: ${opp.score}):\n`;
+          message += `  Güncel Fiyat: 💰 ${opp.price ? opp.price.toFixed(2) : 'Bilinmiyor'}\n`;
+          message += `  Etkinlik: ${opp.event.title} (${opp.event.date})\n`;
+          message += `  Etki: ${opp.event.impact}, Catalyst Skor: ${opp.event.catalystScore}\n`;
+          message += `  Açıklama: ${opp.event.description.slice(0, 100)}...\n`;
+          message += `  Kanıt: ${opp.event.proofLink}\n`;
+          message += `  RSI: ${opp.indicators?.RSI.toFixed(2) || 'Bilinmiyor'}\n`;
+          message += `  MACD: ${opp.indicators?.MACD.toFixed(2) || 'Bilinmiyor'}\n`;
+        }
+        await bot.telegram.sendMessage(GROUP_ID, message, getCoinButtons());
+        await bot.telegram.sendMessage('1616739367', message, getCoinButtons());
+      } catch (error) {
+        console.error('Günlük analiz hatası:', error);
+        await bot.telegram.sendMessage(GROUP_ID, 'Fırsat coin’leri veya CoinMarketCal verileri alınırken hata oluştu, sonra tekrar dene! 😓', getCoinButtons());
+        await bot.telegram.sendMessage('1616739367', 'Fırsat coin’leri veya CoinMarketCal verileri alınırken hata oluştu, sonra tekrar dene! 😓', getCoinButtons());
       }
+    });
 
-      let message = '📈 Günlük Fırsat Coin’leri:\n';
-      for (const opp of opportunities) {
-        message += `\n${opp.coin} (Skor: ${opp.score}):\n`;
-        message += `  Güncel Fiyat: 💰 ${opp.price ? opp.price.toFixed(2) : 'Bilinmiyor'}\n`;
-        message += `  Etkinlikler: ${opp.events.map(e => `${e.title} (${e.date})`).join(', ') || 'Yok'}\n`;
-        message += `  RSI: ${opp.indicators?.RSI.toFixed(2) || 'Bilinmiyor'}\n`;
-        message += `  MACD: ${opp.indicators?.MACD.toFixed(2) || 'Bilinmiyor'}\n`;
-      }
-      await bot.telegram.sendMessage(GROUP_ID, message, getCoinButtons());
-      await bot.telegram.sendMessage('1616739367', message, getCoinButtons());
-    } catch (error) {
-      console.error('Fırsat coin’leri hatası:', error);
-      await bot.telegram.sendMessage(GROUP_ID, 'Fırsat coin’leri alınırken hata oluştu, sonra tekrar dene! 😓', getCoinButtons());
-    }
-  });
+    // Bitcoin fiyat izleme
+    await startBitcoinPriceMonitoring();
 
-  // Bot başlatma
-  bot.launch().then(() => {
-    console.log('Bot başlatıldı!');
-    bot.telegram.sendMessage(GROUP_ID, 'Kripto analiz botu aktif! 🚀 Coin seç, analiz yapalım! 😎', getCoinButtons());
-  }).catch(err => {
-    console.error('Bot başlatma hatası:', err);
+  } catch (error) {
+    console.error('Bot başlatma hatası:', error);
     isBotStarted = false;
-  });
+  }
 }
 
-// HTTP Server for Health Check
+// HTTP Server for Heroku
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Bot is running!');
+  res.end('TraderBot95 çalışıyor!');
 });
 
-// Start the bot and server
-server.listen(process.env.PORT || 3000, () => {
-  console.log(`HTTP server ${process.env.PORT || 3000} portunda çalışıyor.`);
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`Server ${PORT} portunda çalışıyor.`);
   startBot();
 });
 
@@ -1545,5 +1895,6 @@ process.on('unhandledRejection', (reason, promise) => {
 
 process.on('uncaughtException', (error) => {
   console.error('Uncaught Exception:', error);
-  process.exit(1);
 });
+
+module.exports = bot;
