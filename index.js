@@ -6,26 +6,6 @@ const ccxt = require('ccxt');
 const { RSI, MACD, EMA, PSAR, StochasticRSI } = require('technicalindicators');
 const axios = require('axios');
 const WebSocket = require('ws');
-async function getBinancePrice(symbol) {
-  try {
-    const price = await getBinanceCurrentPrice(symbol);
-    if (!price) throw new Error('Binance fiyat alınamadı');
-
-    // CoinGecko ile doğrulama
-    const coinId = symbol.replace('USDT', '').toLowerCase();
-    const cgResponse = await axios.get(`https://api.coingecko.com/api/v3/simple/price?ids=${coinId}&vs_currencies=usd`);
-    const cgPrice = parseFloat(cgResponse.data[coinId]?.usd);
-    if (cgPrice && Math.abs(price - cgPrice) / cgPrice > 0.05) {
-      console.log(`Fiyat uyuşmazlığı: Binance=${price}, CoinGecko=${cgPrice}, CoinGecko kullanılıyor`);
-      return cgPrice;
-    }
-
-    return price;
-  } catch (error) {
-    console.error(`Fiyat hatası: ${symbol}`, error.message);
-    return null;
-  }
-}
 const http = require('http');
 const { analyzeBinanceCoin, findTopTradeOpportunities, wsConnections } = require('./binanceData');
 const fs = require('fs').promises;
