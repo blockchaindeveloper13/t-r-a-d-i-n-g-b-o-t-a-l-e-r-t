@@ -302,14 +302,12 @@ async function fetchCoinMarketCalCoins() {
 }
 
 // CoinMarketCal etkinlikleri
-async function fetchTopCoinEvents(filter = 'catalyst_events') {
+async function fetchTopCoinEvents() { // filter parametresini kaldırdık
   try {
     const events = await rateLimitedCallCoinMarketCal('https://developers.coinmarketcal.com/v1/events', {
-      max: 50,
-      sortBy: filter,
-      showOnly: filter,
+      max: 100, // Daha fazla etkinlik için artırdık
       dateRangeStart: new Date().toISOString().split('T')[0],
-      dateRangeEnd: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+      dateRangeEnd: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], // 2 hafta
       showVotes: true,
       showViews: true,
       translations: 'tr',
