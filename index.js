@@ -17,12 +17,6 @@ async function getBinancePrice(symbol) {
   }
 }
 
-    // WebSocket başarısızsa REST API
-    if (!price) {
-      const response = await axios.get(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`);
-      price = parseFloat(response.data.price);
-    }
-
     // CoinGecko ile doğrulama
     const coinId = symbol.replace('USDT', '').toLowerCase();
     const cgResponse = await axios.get(`https://api.coingecko.com/api/v3/simple/price?ids=${coinId}&vs_currencies=usd`);
