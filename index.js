@@ -1475,8 +1475,8 @@ const server = http.createServer((req, res) => {
 });
 
 // Start the bot and server
-server.listen(3000, () => {
-  console.log('HTTP server 3000 portunda çalışıyor.');
+server.listen(process.env.PORT || 3000, () => {
+  console.log(`HTTP server ${process.env.PORT || 3000} portunda çalışıyor.`);
   startBot();
 });
 
