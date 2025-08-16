@@ -269,27 +269,34 @@ async function fetchCoinMarketCalCoins() {
 // CoinMarketCal etkinlikleri
 async function fetchTopCoinEvents(coins, filter = 'catalyst_events') {
   try {
-    const symbols = coins.map(coin => coin.symbol.toLowerCase()).join(',');
+    const symbols = coins.map(coin => coin.symbol?.toLowerCase()).filter(Boolean).join(',');
+    if (!symbols) {
+      console.error('No valid coin symbols for CoinMarketCal');
+      return [];
+    }
     const events = await rateLimitedCallCoinMarketCal('https://developers.coinmarketcal.com/v1/events', {
       coins: symbols,
       max: 50,
       sortBy: filter,
       showOnly: filter,
-      dateRangeStart: new Date().toISOString().split('T')[0], // Bugün
-      dateRangeEnd: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], // 1 hafta sonrası
+      dateRangeStart: new Date().toISOString().split('T')[0],
+      dateRangeEnd: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
       showVotes: true,
       showViews: true,
-      translations: 'tr', // Türkçe çeviriler
+      translations: 'tr',
     });
-    return events.map(event => ({
-      coin: event.coin,
-      title: event.title,
-      date: event.displayed_date,
-      impact: event.is_popular || event.catalyst_score > 0 ? 'Positive' : 'Neutral',
-      catalystScore: event.catalyst_score || 0,
-      viewCount: event.view_count || 0,
-      voteCount: event.vote_count || 0,
-    }));
+    console.log('CoinMarketCal raw events:', events); // Ham API yanıtını logla
+    return events
+      .filter(event => event.coin && event.title && typeof event.coin === 'string' && typeof event.title === 'string')
+      .map(event => ({
+        coin: event.coin || 'Bilinmiyor',
+        title: event.title || 'Etkinlik başlığı yok',
+        date: event.displayed_date || 'Bilinmiyor',
+        impact: event.is_popular || event.catalyst_score > 0 ? 'Positive' : 'Neutral',
+        catalystScore: event.catalyst_score || 0,
+        viewCount: event.view_count || 0,
+        voteCount: event.vote_count || 0,
+      }));
   } catch (error) {
     console.error('CoinMarketCal events error:', error.message);
     return [];
