@@ -267,16 +267,10 @@ async function fetchCoinMarketCalCoins() {
 }
 
 // CoinMarketCal etkinlikleri
-async function fetchTopCoinEvents(coins, filter = 'catalyst_events') {
+async function fetchTopCoinEvents(filter = 'catalyst_events') {
   try {
-    const symbols = coins.map(coin => coin.symbol?.toLowerCase()).filter(Boolean).join(',');
-    if (!symbols) {
-      console.error('No valid coin symbols for CoinMarketCal');
-      return [];
-    }
     const events = await rateLimitedCallCoinMarketCal('https://developers.coinmarketcal.com/v1/events', {
-      coins: symbols,
-      max: 50,
+      max: 50, // Maksimum 50 etkinlik
       sortBy: filter,
       showOnly: filter,
       dateRangeStart: new Date().toISOString().split('T')[0],
@@ -296,6 +290,7 @@ async function fetchTopCoinEvents(coins, filter = 'catalyst_events') {
         catalystScore: event.catalyst_score || 0,
         viewCount: event.view_count || 0,
         voteCount: event.vote_count || 0,
+        description: event.description || 'Açıklama yok', // Etkinlik açıklamasını ekle
       }));
   } catch (error) {
     console.error('CoinMarketCal events error:', error.message);
@@ -305,17 +300,39 @@ async function fetchTopCoinEvents(coins, filter = 'catalyst_events') {
 
 // CoinMarketCal etkinliklerini Grok ile yorumlama
 async function analyzeCoinMarketCalEvents(events, chatHistory) {
-  const eventSummaries = events.map(e => `${e.coin}: ${e.title} (${e.date}, Etki: ${e.impact}, Catalyst Skor: ${e.catalystScore})`).join('; ');
-  const prompt = `
-    CoinMarketCal’dan gelen etkinlikler: ${eventSummaries}.
-    Her etkinliği (token yakma, kilit açılışı, borsa listelenmesi vb.) tarihleriyle oku ve fiyat üzerindeki potansiyel etkisini Türkçe, samimi, kısa bir şekilde yorumla (her etkinlik için maks. 100 kelime). 
-    Fırsat coin’lerini belirle, neden fırsat olduğunu açıkla (örn. token yakma arzı azaltır, fiyat artabilir). 
-    Teknik analiz verisi olmadan sadece etkinliklere odaklan. 
-    Son 10 konuşma: ${chatHistory.join('; ')}.
-    Yorumlar trader’lara hitap etsin, alım/satım önerisi ver, stop-loss ve hedef fiyat belirtme.
-  `;
-  const comment = await rateLimitedCallGrok(prompt);
-  return comment || 'Etkinlikler analiz edilemedi, lütfen tekrar dene kanka! 😓';
+  try {
+    // Etkinlikleri Grok'a analiz için formatla
+    const eventSummaries = events.map(event => ({
+      coin: event.coin,
+      title: event.title,
+      date: event.date,
+      impact: event.impact,
+      catalystScore: event.catalystScore,
+      viewCount: event.viewCount,
+      voteCount: event.voteCount,
+      description: event.description,
+    }));
+
+    // Grok'a gönderilecek prompt
+    const prompt = `
+      Aşağıdaki CoinMarketCal etkinliklerini analiz et ve hangi coinlerin iyi yatırım fırsatları sunduğunu belirle. Her etkinliğin başlığını, açıklamasını, etki derecesini (impact), catalyst skorunu, görüntülenme ve oy sayısını dikkate al. Pozitif etki (impact: Positive) ve yüksek catalyst skoru (örneğin, 5 veya üstü) olan etkinliklere öncelik ver. Ayrıca, popülerlik (viewCount, voteCount) ve açıklamadaki olumlu kelimeleri (örneğin, "lansman", "ortaklık", "listeleme") dikkate alarak hangi coinlerin fiyat artışı potansiyeli taşıdığını değerlendir. Sonuçları kısa ve anlaşılır bir şekilde özetle, her coin için neden fırsat sunduğunu açıkla.
+
+      Etkinlikler:
+      ${JSON.stringify(eventSummaries, null, 2)}
+
+      Çıktı formatı:
+      - Coin: [Coin Adı]
+        - Fırsat Seviyesi: [Yüksek/Orta/Düşük]
+        - Neden: [Kısa açıklama, örneğin, "Büyük bir borsada listeleme, yüksek catalyst skoru"]
+    `;
+
+    // Grok API çağrısı (xAI API'sini kullanıyoruz)
+    const grokResponse = await rateLimitedCallGrok(prompt, 300); // 300ms rate limit
+    return grokResponse || 'Analiz yapılamadı, lütfen tekrar deneyin.';
+  } catch (error) {
+    console.error('Grok analiz hatası:', error.message);
+    return 'Grok analizinde hata oluştu.';
+  }
 }
 
 // CoinMarketCap top 100 ve top 500
@@ -1123,8 +1140,7 @@ bot.action('coinmarketcal', async (ctx) => {
   console.log('Inline CoinMarketCal isteği, chat ID:', ctx.chat.id);
   try {
     await ctx.reply('CoinMarketCal etkinliklerini çekiyorum, biraz bekle kanka! 😎');
-    const { top100, top500 } = await getTopCoinsFromCMCAndCMCal();
-    const events = await fetchTopCoinEvents([...top100, ...top500.slice(100)]);
+    const events = await fetchTopCoinEvents('catalyst_events');
     const chatHistory = await getRecentChatHistory(db, ctx.chat.id.toString());
 
     if (!events.length) {
@@ -1132,22 +1148,52 @@ bot.action('coinmarketcal', async (ctx) => {
       return;
     }
 
-    // Etkinlikleri listele
+    // İlk 10 etkinliği al
+    const limitedEvents = events.slice(0, 10);
     let eventMessage = '📅 CoinMarketCal Etkinlikleri (1 Hafta İçinde):\n';
-    for (const event of events) {
+    for (const event of limitedEvents) {
       eventMessage += `\n${event.coin}: ${event.title} (${event.date})\n`;
       eventMessage += `Etki: ${event.impact}, Catalyst Skor: ${event.catalystScore}\n`;
       eventMessage += `Görüntülenme: ${event.viewCount}, Oy: ${event.voteCount}\n`;
     }
 
-    // Grok ile yorumlat
-    const comment = await analyzeCoinMarketCalEvents(events, chatHistory);
-    await ctx.reply(eventMessage, getCoinButtons());
-    await ctx.reply(`📝 Grok Yorumu:\n${comment}`, getCoinButtons());
+    // Mesajı parçalara böl
+    const maxMessageLength = 4000; // Telegram mesaj sınırı
+    if (eventMessage.length > maxMessageLength) {
+      const messages = [];
+      let currentMessage = '📅 CoinMarketCal Etkinlikleri (1 Hafta İçinde):\n';
+      let currentLength = currentMessage.length;
 
+      for (const event of limitedEvents) {
+        const eventText = `\n${event.coin}: ${event.title} (${event.date})\nEtki: ${event.impact}, Catalyst Skor: ${event.catalystScore}\nGörüntülenme: ${event.viewCount}, Oy: ${event.voteCount}\n`;
+        if (currentLength + eventText.length > maxMessageLength) {
+          messages.push(currentMessage);
+          currentMessage = '📅 CoinMarketCal Etkinlikleri (Devam):\n';
+          currentLength = currentMessage.length;
+        }
+        currentMessage += eventText;
+        currentLength += eventText.length;
+      }
+      messages.push(currentMessage);
+
+      for (const msg of messages) {
+        await ctx.reply(msg, getCoinButtons());
+        if (ctx.chat.id.toString() === GROUP_ID) {
+          await bot.telegram.sendMessage(GROUP_ID, msg, getCoinButtons());
+        }
+      }
+    } else {
+      await ctx.reply(eventMessage, getCoinButtons());
+      if (ctx.chat.id.toString() === GROUP_ID) {
+        await bot.telegram.sendMessage(GROUP_ID, eventMessage, getCoinButtons());
+      }
+    }
+
+    // Grok ile analiz
+    const comment = await analyzeCoinMarketCalEvents(limitedEvents, chatHistory);
+    await ctx.reply(`📝 Grok Fırsat Analizi:\n${comment}`, getCoinButtons());
     if (ctx.chat.id.toString() === GROUP_ID) {
-      await bot.telegram.sendMessage(GROUP_ID, eventMessage, getCoinButtons());
-      await bot.telegram.sendMessage(GROUP_ID, `📝 Grok Yorumu:\n${comment}`, getCoinButtons());
+      await bot.telegram.sendMessage(GROUP_ID, `📝 Grok Fırsat Analizi:\n${comment}`, getCoinButtons());
     }
     await saveChatHistory(db, ctx.chat.id.toString(), 'Inline: coinmarketcal');
   } catch (error) {
