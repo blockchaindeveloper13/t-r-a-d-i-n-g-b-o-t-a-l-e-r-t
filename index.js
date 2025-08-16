@@ -8,7 +8,7 @@ const NodeCache = require('node-cache');
 const winston = require('winston');
 require('dotenv').config();
 
-const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
+const bot = new Telegraf(process.env.TELEGRAM_TOKEN);
 const cache = new NodeCache({ stdTTL: 180, checkperiod: 60 });
 const logger = winston.createLogger({
   level: 'info',
