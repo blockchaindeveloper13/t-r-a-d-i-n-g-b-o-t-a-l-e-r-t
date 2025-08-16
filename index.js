@@ -6,6 +6,43 @@ const ccxt = require('ccxt');
 const { RSI, MACD, EMA, PSAR, StochasticRSI } = require('technicalindicators');
 const axios = require('axios');
 const WebSocket = require('ws');
+async function getBinancePrice(symbol) {
+  try {
+    // WebSocket ile fiyat çek
+    let price = await new Promise((resolve) => {
+      const ws = new WebSocket(`wss://stream.binance.com:9443/ws/${symbol.toLowerCase()}@ticker`);
+      ws.on('message', (data) => {
+        const msg = JSON.parse(data);
+        if (msg.c) {
+          ws.close();
+          resolve(parseFloat(msg.c));
+        }
+      });
+      ws.on('error', () => resolve(null));
+      setTimeout(() => resolve(null), 5000); // 5sn timeout
+    });
+
+    // WebSocket başarısızsa REST API
+    if (!price) {
+      const response = await axios.get(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`);
+      price = parseFloat(response.data.price);
+    }
+
+    // CoinGecko ile doğrulama
+    const coinId = symbol.replace('USDT', '').toLowerCase();
+    const cgResponse = await axios.get(`https://api.coingecko.com/api/v3/simple/price?ids=${coinId}&vs_currencies=usd`);
+    const cgPrice = parseFloat(cgResponse.data[coinId]?.usd);
+    if (cgPrice && Math.abs(price - cgPrice) / cgPrice > 0.05) {
+      console.log(`Fiyat uyuşmazlığı: Binance=${price}, CoinGecko=${cgPrice}, CoinGecko kullanılıyor`);
+      price = cgPrice;
+    }
+
+    return price;
+  } catch (error) {
+    console.error(`Fiyat hatası: ${symbol}`, error.message);
+    return null;
+  }
+}
 const http = require('http');
 const { analyzeBinanceCoin, findTopTradeOpportunities } = require('./binanceData');
 const fs = require('fs').promises;
@@ -14,10 +51,13 @@ const path = require('path');
 // Cache dosyası
 const CACHE_FILE = path.join('/tmp', 'coinmarketcal_events.json');
 
-// Cache for API responses, analyses, and Bitcoin signals
-const cache = new Map();
-const CACHE_DURATION = 2 * 60 * 60 * 1000; // 2 hours
-const CACHE_CLEAR_INTERVAL = 30 * 1000; // 30 seconds
+const NodeCache = require('node-cache');
+const cache = new NodeCache({ stdTTL: 300 }); // 5dk TTL
+
+function clearCache() {
+  cache.flushAll();
+  console.log('Cache tamamen temizlendi');
+}
 const BITCOIN_SIGNAL_COOLDOWN = 2 * 60 * 60 * 1000; // 2 hours cooldown for same signal type
 
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN || 'your-telegram-bot-token');
@@ -1943,18 +1983,21 @@ async function startBitcoinPriceMonitoring() {
 
   return stop;
 }
-
-// Cache Cleanup
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, value] of cache) {
-    if (now - value.timestamp > CACHE_DURATION) {
-      cache.delete(key);
-    }
+async function analyzeBinanceCoin(symbol, timeframe, grokCaller) {
+  const cacheKey = `${symbol}-${timeframe}-analysis`;
+  if (cache.has(cacheKey)) {
+    const cached = cache.get(cacheKey);
+    console.log('Cache hit:', cacheKey);
+    return cached;
   }
-  console.log('Cache temizlendi, kalan öğe sayısı:', cache.size);
-}, CACHE_CLEAR_INTERVAL);
-
+  clearCache(); // Analiz öncesi cache’i sıfırla
+  const currentPrice = await getBinancePrice(symbol);
+  if (!currentPrice) throw new Error('Fiyat alınamadı');
+  // ... analiz devam eder
+  const result = { /* analiz sonucu */ };
+  cache.set(cacheKey, result);
+  return result;
+}
 // Bot Start
 async function startBot() {
   if (isBotStarted) return;
