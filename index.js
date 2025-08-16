@@ -44,7 +44,7 @@ async function getBinancePrice(symbol) {
   }
 }
 const http = require('http');
-const { analyzeBinanceCoin, findTopTradeOpportunities } = require('./binanceData');
+const { analyzeBinanceCoin, findTopTradeOpportunities, wsConnections } = require('./binanceData');
 const fs = require('fs').promises;
 const path = require('path');
 
