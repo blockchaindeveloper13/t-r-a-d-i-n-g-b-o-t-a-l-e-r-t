@@ -8,19 +8,14 @@ const axios = require('axios');
 const WebSocket = require('ws');
 async function getBinancePrice(symbol) {
   try {
-    // WebSocket ile fiyat çek
-    let price = await new Promise((resolve) => {
-      const ws = new WebSocket(`wss://stream.binance.com:9443/ws/${symbol.toLowerCase()}@ticker`);
-      ws.on('message', (data) => {
-        const msg = JSON.parse(data);
-        if (msg.c) {
-          ws.close();
-          resolve(parseFloat(msg.c));
-        }
-      });
-      ws.on('error', () => resolve(null));
-      setTimeout(() => resolve(null), 5000); // 5sn timeout
-    });
+    const price = await getBinanceCurrentPrice(symbol);
+    if (!price) throw new Error('Binance fiyat alınamadı');
+    return price;
+  } catch (error) {
+    logger.error(`Fiyat hatası: ${symbol}, ${error.message}`);
+    return null;
+  }
+}
 
     // WebSocket başarısızsa REST API
     if (!price) {
@@ -1983,21 +1978,7 @@ async function startBitcoinPriceMonitoring() {
 
   return stop;
 }
-async function analyzeBinanceCoin(symbol, timeframe, grokCaller) {
-  const cacheKey = `${symbol}-${timeframe}-analysis`;
-  if (cache.has(cacheKey)) {
-    const cached = cache.get(cacheKey);
-    console.log('Cache hit:', cacheKey);
-    return cached;
-  }
-  clearCache(); // Analiz öncesi cache’i sıfırla
-  const currentPrice = await getBinancePrice(symbol);
-  if (!currentPrice) throw new Error('Fiyat alınamadı');
-  // ... analiz devam eder
-  const result = { /* analiz sonucu */ };
-  cache.set(cacheKey, result);
-  return result;
-}
+
 // Bot Start
 async function startBot() {
   if (isBotStarted) return;
