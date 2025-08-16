@@ -10,12 +10,6 @@ async function getBinancePrice(symbol) {
   try {
     const price = await getBinanceCurrentPrice(symbol);
     if (!price) throw new Error('Binance fiyat alınamadı');
-    return price;
-  } catch (error) {
-    logger.error(`Fiyat hatası: ${symbol}, ${error.message}`);
-    return null;
-  }
-}
 
     // CoinGecko ile doğrulama
     const coinId = symbol.replace('USDT', '').toLowerCase();
@@ -23,7 +17,7 @@ async function getBinancePrice(symbol) {
     const cgPrice = parseFloat(cgResponse.data[coinId]?.usd);
     if (cgPrice && Math.abs(price - cgPrice) / cgPrice > 0.05) {
       console.log(`Fiyat uyuşmazlığı: Binance=${price}, CoinGecko=${cgPrice}, CoinGecko kullanılıyor`);
-      price = cgPrice;
+      return cgPrice;
     }
 
     return price;
