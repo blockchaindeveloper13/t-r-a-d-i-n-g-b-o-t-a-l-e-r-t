@@ -32,12 +32,23 @@ const db = new sqlite3.Database(':memory:', (err) => {
   db.run('CREATE TABLE IF NOT EXISTS chat_history (chatId TEXT, message TEXT, timestamp INTEGER)');
 });
 
-// Binance public endpoint'ler için kimlik doğrulama olmadan
-const binance = new ccxt.binance({ enableRateLimit: true });
+// Binance API (kimlik doğrulamalı)
+const binance = new ccxt.binance({
+  apiKey: process.env.BINANCE_API_KEY || '',
+  secret: process.env.BINANCE_SECRET_KEY || '',
+  enableRateLimit: true
+});
 
-async function fetchHttpKlines(symbol, timeframe, startTime, endTime) {
+// KuCoin API (kimlik doğrulamalı)
+const kucoin = new ccxt.kucoin({
+  apiKey: process.env.KUCOIN_KEY || '',
+  secret: process.env.KUCOIN_SECRET || '',
+  enableRateLimit: true
+});
+
+async function fetchHttpKlines(exchange, symbol, timeframe, startTime, endTime) {
   try {
-    const ohlcv = await binance.fetchOHLCV(symbol, timeframe, startTime * 1000, 1000);
+    const ohlcv = await exchange.fetchOHLCV(symbol, timeframe, startTime * 1000, 1000);
     return ohlcv.map(candle => ({
       open: parseFloat(candle[1]),
       high: parseFloat(candle[2]),
@@ -47,33 +58,51 @@ async function fetchHttpKlines(symbol, timeframe, startTime, endTime) {
       timestamp: candle[0] / 1000
     }));
   } catch (error) {
-    logger.error(`Binance kline hatası (${symbol}):`, error.message);
+    logger.error(`${exchange.id} kline hatası (${symbol}):`, error.message);
     return [];
   }
 }
 
-async function getCurrentPrice(symbol) {
+async function getCurrentPrice(exchange, symbol) {
   try {
-    const ticker = await binance.fetchTicker(symbol);
+    const ticker = await exchange.fetchTicker(symbol);
     return parseFloat(ticker.last);
   } catch (error) {
-    logger.error(`Binance fiyat hatası (${symbol}):`, error.message);
+    logger.error(`${exchange.id} fiyat hatası (${symbol}):`, error.message);
     return null;
   }
 }
 
-async function startWebSocket(symbol, targetPrice, chatId, callback) {
-  const ws = new ccxt.binance({ enableRateLimit: true });
+async function getCoinMarketCapPrice(symbol) {
+  try {
+    const coin = symbol.split('-')[0];
+    const response = await axios.get('https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest', {
+      params: { symbol: coin },
+      headers: { 'X-CMC_PRO_API_KEY': process.env.COINMARKETCAP_API }
+    });
+    return parseFloat(response.data.data[coin].quote.USD.price);
+  } catch (error) {
+    logger.error(`CoinMarketCap fiyat hatası (${symbol}):`, error.message);
+    return null;
+  }
+}
+
+async function startWebSocket(exchange, symbol, targetPrice, chatId, callback) {
+  const ws = new exchange.constructor({
+    apiKey: exchange.apiKey,
+    secret: exchange.secret,
+    enableRateLimit: true
+  });
 
   const stop = async () => {
-    logger.info(`WebSocket durduruldu: ${symbol}`);
+    logger.info(`WebSocket durduruldu: ${symbol} (${exchange.id})`);
   };
 
   ws.watchTicker(symbol).then(async (ticker) => {
     const price = parseFloat(ticker.last);
     await callback({ price });
   }).catch(error => {
-    logger.error(`WebSocket hatası (${symbol}):`, error.message);
+    logger.error(`WebSocket hatası (${symbol}, ${exchange.id}):`, error.message);
   });
 
   return { stop };
@@ -131,9 +160,14 @@ async function loadEventsFromCache() {
 
 async function analyzeCoin(coin, btcData, news, chatHistory) {
   try {
-    const klines = await fetchHttpKlines(coin, '1h', Math.floor(Date.now() / 1000) - 24 * 60 * 60, Math.floor(Date.now() / 1000));
-    const currentPrice = await getCurrentPrice(coin);
-    if (!klines.length || !currentPrice) {
+    const binanceKlines = await fetchHttpKlines(binance, coin, '1h', Math.floor(Date.now() / 1000) - 24 * 60 * 60, Math.floor(Date.now() / 1000));
+    const kucoinKlines = await fetchHttpKlines(kucoin, coin, '1h', Math.floor(Date.now() / 1000) - 24 * 60 * 60, Math.floor(Date.now() / 1000));
+    const binancePrice = await getCurrentPrice(binance, coin);
+    const kucoinPrice = await getCurrentPrice(kucoin, coin);
+    const cmcPrice = await getCoinMarketCapPrice(coin);
+
+    const currentPrice = binancePrice || kucoinPrice || cmcPrice;
+    if (!binanceKlines.length && !kucoinKlines.length || !currentPrice) {
       return {
         coin,
         tarih: Date.now(),
@@ -151,7 +185,7 @@ async function analyzeCoin(coin, btcData, news, chatHistory) {
           longTermSupport: 0,
           longTermResistance: 0,
           longTermResistanceTarget: 0,
-          yorum: 'Veri eksik, Binance API’yi kontrol et kanka! 😓'
+          yorum: 'Veri eksik, Binance/KuCoin/CoinMarketCap API’lerini kontrol et kanka! 😓'
         }
       };
     }
@@ -161,6 +195,9 @@ async function analyzeCoin(coin, btcData, news, chatHistory) {
       tarih: Date.now(),
       analyses: {
         currentPrice,
+        binancePrice,
+        kucoinPrice,
+        cmcPrice,
         giriş: currentPrice * 0.98,
         shortTermÇıkış: currentPrice * 1.02,
         dailyÇıkış: currentPrice * 1.05,
@@ -218,7 +255,7 @@ async function findOpportunityCoins() {
 async function findTopTradeOpportunities() {
   return {
     timestamp: new Date().toLocaleString('tr-TR'),
-    summary: 'Binance top 100 tarandı, en iyi 3 coin bulundu.',
+    summary: 'Binance ve KuCoin top 100 tarandı, en iyi 3 coin bulundu.',
     opportunities: COINS.slice(0, 3).map(coin => ({
       coin,
       analyses: {
@@ -247,16 +284,20 @@ async function analyzeCoinMarketCalEvents(events, chatHistory) {
 
 async function fullAnalysis(news, chatHistory) {
   try {
-    const btcData = await fetchHttpKlines('BTC-USDT', '1hour', Math.floor(Date.now() / 1000) - 24 * 60 * 60, Math.floor(Date.now() / 1000));
+    const btcDataBinance = await fetchHttpKlines(binance, 'BTC-USDT', '1hour', Math.floor(Date.now() / 1000) - 24 * 60 * 60, Math.floor(Date.now() / 1000));
+    const btcDataKucoin = await fetchHttpKlines(kucoin, 'BTC-USDT', '1hour', Math.floor(Date.now() / 1000) - 24 * 60 * 60, Math.floor(Date.now() / 1000));
     const messages = [];
     for (const coin of COINS) {
-      const analysis = await analyzeCoin(coin, btcData, news, chatHistory);
+      const analysis = await analyzeCoin(coin, btcDataBinance.length ? btcDataBinance : btcDataKucoin, news, chatHistory);
       const messageId = `${coin}-${analysis.tarih}`;
       if (sentMessages.has(messageId)) continue;
       sentMessages.add(messageId);
 
       let message = `${coin} Analizi (${new Date().toLocaleString('tr-TR')}):\n`;
       message += `  Güncel Fiyat: 💰 ${analysis.analyses.currentPrice ? analysis.analyses.currentPrice.toFixed(2) : 'Bilinmiyor'}\n`;
+      if (analysis.analyses.binancePrice) message += `  Binance Fiyat: 💰 ${analysis.analyses.binancePrice.toFixed(2)}\n`;
+      if (analysis.analyses.kucoinPrice) message += `  KuCoin Fiyat: 💰 ${analysis.analyses.kucoinPrice.toFixed(2)}\n`;
+      if (analysis.analyses.cmcPrice) message += `  CoinMarketCap Fiyat: 💰 ${analysis.analyses.cmcPrice.toFixed(2)}\n`;
       message += `  Giriş: 📉 ${analysis.analyses.giriş.toFixed(2)}\n`;
       message += `  Kısa Vadeli Çıkış (4-6 saat): 📈 ${analysis.analyses.shortTermÇıkış.toFixed(2)}\n`;
       message += `  Günlük Çıkış (24 saat): 📈 ${analysis.analyses.dailyÇıkış.toFixed(2)}\n`;
@@ -277,23 +318,29 @@ async function fullAnalysis(news, chatHistory) {
     return messages;
   } catch (error) {
     logger.error('Tüm coin analizlerinde hata:', error.message);
-    return ['Tüm coin analizlerinde hata oluştu, Binance API’yi kontrol et kanka! 😓'];
+    return ['Tüm coin analizlerinde hata oluştu, Binance/KuCoin/CoinMarketCap API’lerini kontrol et kanka! 😓'];
   }
 }
 
 async function getQuickStatus(coin) {
   try {
-    const currentPrice = await getCurrentPrice(coin);
+    const binancePrice = await getCurrentPrice(binance, coin);
+    const kucoinPrice = await getCurrentPrice(kucoin, coin);
+    const cmcPrice = await getCoinMarketCapPrice(coin);
+    const currentPrice = binancePrice || kucoinPrice || cmcPrice;
     if (!currentPrice) {
-      return `Hızlı Durum: ${coin.split('-')[0]} 💰 Bilinmiyor. Fiyat alınamadı, Binance API’ye bak! 😓`;
+      return `Hızlı Durum: ${coin.split('-')[0]} 💰 Bilinmiyor. Fiyat alınamadı, API’leri kontrol et! 😓`;
     }
 
     const endAt = Math.floor(Date.now() / 1000);
     const startAt = endAt - 10 * 60;
-    let klines = await fetchHttpKlines(coin, '5m', startAt, endAt);
+    let klines = await fetchHttpKlines(binance, coin, '5m', startAt, endAt);
+    if (!klines || klines.length < 2) {
+      klines = await fetchHttpKlines(kucoin, coin, '5m', startAt, endAt);
+    }
 
     if (!klines || klines.length < 2) {
-      logger.info(`Binance kline verisi eksik: ${coin}, CoinGecko deneniyor`);
+      logger.info(`Binance/KuCoin kline verisi eksik: ${coin}, CoinGecko deneniyor`);
       try {
         const coinId = coin.split('-')[0].toLowerCase();
         const response = await axios.get(`https://api.coingecko.com/api/v3/coins/${coinId}/market_chart?vs_currency=usd&days=0.006944`);
@@ -317,7 +364,7 @@ async function getQuickStatus(coin) {
     return `Hızlı Durum: ${coin.split('-')[0]} 💰 ${currentPrice.toFixed(2)} USDT, Son 5dk: ${trend}`;
   } catch (error) {
     logger.error(`Hızlı durum hatası: ${coin}:`, error.message);
-    return `Hızlı Durum: ${coin.split('-')[0]} için veri alınamadı. Binance API’yi kontrol et! 😓`;
+    return `Hızlı Durum: ${coin.split('-')[0]} için veri alınamadı. API’leri kontrol et! 😓`;
   }
 }
 
@@ -466,7 +513,7 @@ bot.command('coinmarketcal', async (ctx) => {
 bot.command('top3', async (ctx) => {
   logger.info('Top 3 fırsat komutu alındı, chat ID:', ctx.chat.id);
   try {
-    await ctx.reply('Binance top 100 içinde en iyi 3 trade fırsatını tarıyorum, biraz bekle kanka! 😎');
+    await ctx.reply('Binance ve KuCoin top 100 içinde en iyi 3 trade fırsatını tarıyorum, biraz bekle kanka! 😎');
     const result = await findTopTradeOpportunities();
     if (result.error) {
       await ctx.reply(`Hata: ${result.error}`, getCoinButtons());
@@ -553,14 +600,17 @@ bot.command('opportunities', async (ctx) => {
 
     let message = '📈 Potansiyel Fırsat Coin’leri (Kaynak: CoinMarketCal):\n';
     for (const opp of opportunities) {
+      const binancePrice = await getCurrentPrice(binance, opp.symbol);
+      const kucoinPrice = await getCurrentPrice(kucoin, opp.symbol);
+      const cmcPrice = await getCoinMarketCapPrice(opp.symbol);
       message += `\n${opp.coin} (${opp.symbol}, Skor: ${opp.score}):\n`;
-      message += `  Güncel Fiyat: 💰 ${opp.price ? opp.price.toFixed(2) : 'Bilinmiyor'}\n`;
+      message += `  Güncel Fiyat: 💰 ${binancePrice ? binancePrice.toFixed(2) : kucoinPrice ? kucoinPrice.toFixed(2) : cmcPrice ? cmcPrice.toFixed(2) : 'Bilinmiyor'}\n`;
       message += `  Etkinlik: ${opp.event.title} (${opp.event.date})\n`;
       message += `  Etki: ${opp.event.impact}, Catalyst Skor: ${opp.event.catalystScore}\n`;
       message += `  Açıklama: ${opp.event.description.slice(0, 100)}...\n`;
       message += `  Kanıt: ${opp.event.proofLink}\n`;
-      message += `  RSI: ${opp.indicators?.RSI.toFixed(2) || 'Bilinmiyor'}\n`;
-      message += `  MACD: ${opp.indicators?.MACD.toFixed(2) || 'Bilinmiyor'}\n`;
+      message += `  RSI: ${opp.indicators?.RSI?.toFixed(2) || 'Bilinmiyor'}\n`;
+      message += `  MACD: ${opp.indicators?.MACD?.toFixed(2) || 'Bilinmiyor'}\n`;
     }
 
     const maxMessageLength = 4096;
@@ -570,14 +620,17 @@ bot.command('opportunities', async (ctx) => {
       let currentLength = currentMessage.length;
 
       for (const opp of opportunities) {
+        const binancePrice = await getCurrentPrice(binance, opp.symbol);
+        const kucoinPrice = await getCurrentPrice(kucoin, opp.symbol);
+        const cmcPrice = await getCoinMarketCapPrice(opp.symbol);
         const oppText = `\n${opp.coin} (${opp.symbol}, Skor: ${opp.score}):\n` +
-                        `  Güncel Fiyat: 💰 ${opp.price ? opp.price.toFixed(2) : 'Bilinmiyor'}\n` +
+                        `  Güncel Fiyat: 💰 ${binancePrice ? binancePrice.toFixed(2) : kucoinPrice ? kucoinPrice.toFixed(2) : cmcPrice ? cmcPrice.toFixed(2) : 'Bilinmiyor'}\n` +
                         `  Etkinlik: ${opp.event.title} (${opp.event.date})\n` +
                         `  Etki: ${opp.event.impact}, Catalyst Skor: ${opp.event.catalystScore}\n` +
                         `  Açıklama: ${opp.event.description.slice(0, 100)}...\n` +
                         `  Kanıt: ${opp.event.proofLink}\n` +
-                        `  RSI: ${opp.indicators?.RSI.toFixed(2) || 'Bilinmiyor'}\n` +
-                        `  MACD: ${opp.indicators?.MACD.toFixed(2) || 'Bilinmiyor'}\n`;
+                        `  RSI: ${opp.indicators?.RSI?.toFixed(2) || 'Bilinmiyor'}\n` +
+                        `  MACD: ${opp.indicators?.MACD?.toFixed(2) || 'Bilinmiyor'}\n`;
         if (currentLength + oppText.length > maxMessageLength) {
           messages.push(currentMessage);
           currentMessage = '📈 Potansiyel Fırsat Coin’leri (Devam):\n';
@@ -654,6 +707,9 @@ bot.action(/analyze_(.+)/, async (ctx) => {
 
     let message = `${coin} Analizi (${new Date(analysis.tarih).toLocaleString('tr-TR')}):\n`;
     message += `  Güncel Fiyat: 💰 ${analysis.analyses.currentPrice ? analysis.analyses.currentPrice.toFixed(2) : 'Bilinmiyor'}\n`;
+    if (analysis.analyses.binancePrice) message += `  Binance Fiyat: 💰 ${analysis.analyses.binancePrice.toFixed(2)}\n`;
+    if (analysis.analyses.kucoinPrice) message += `  KuCoin Fiyat: 💰 ${analysis.analyses.kucoinPrice.toFixed(2)}\n`;
+    if (analysis.analyses.cmcPrice) message += `  CoinMarketCap Fiyat: 💰 ${analysis.analyses.cmcPrice.toFixed(2)}\n`;
     message += `  Giriş: 📉 ${analysis.analyses.giriş.toFixed(2)}\n`;
     message += `  Kısa Vadeli Çıkış (4-6 saat): 📈 ${analysis.analyses.shortTermÇıkış.toFixed(2)}\n`;
     message += `  Günlük Çıkış (24 saat): 📈 ${analysis.analyses.dailyÇıkış.toFixed(2)}\n`;
@@ -746,7 +802,7 @@ bot.action(/alarm_(.+)/, async (ctx) => {
       );
       await saveChatHistory(db, chatId, `Alarm kuruldu: ${coin} @ ${targetPrice.toFixed(2)}`);
 
-      const ws = await startWebSocket(coin, targetPrice, chatId, async ({ price }) => {
+      const ws = await startWebSocket(binance, coin, targetPrice, chatId, async ({ price }) => {
         if (Math.abs(price - targetPrice) <= 0.01 * targetPrice) {
           await bot.telegram.sendMessage(
             chatId,
@@ -917,6 +973,9 @@ schedule.scheduleJob('0 */2 * * *', async () => {
     if (isDropSignal) {
       const message = `🚨 Bitcoin Düşüş Sinyali!\n` +
                       `Güncel Fiyat: 💰 ${btcAnalysis.analyses.currentPrice.toFixed(2)} USDT\n` +
+                      `Binance Fiyat: 💰 ${btcAnalysis.analyses.binancePrice ? btcAnalysis.analyses.binancePrice.toFixed(2) : 'Bilinmiyor'}\n` +
+                      `KuCoin Fiyat: 💰 ${btcAnalysis.analyses.kucoinPrice ? btcAnalysis.analyses.kucoinPrice.toFixed(2) : 'Bilinmiyor'}\n` +
+                      `CoinMarketCap Fiyat: 💰 ${btcAnalysis.analyses.cmcPrice ? btcAnalysis.analyses.cmcPrice.toFixed(2) : 'Bilinmiyor'}\n` +
                       `Tahmini Dip: 📉 ${btcAnalysis.analyses.giriş.toFixed(2)} USDT\n` +
                       `RSI: ${indicators.RSI.toFixed(2)}, MACD: ${indicators.MACD.toFixed(2)} (Sinyal: ${indicators.signal.toFixed(2)})\n` +
                       `Hacim Değişimi: ${indicators.volumeChange.toFixed(2)}%\n` +
