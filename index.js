@@ -8,7 +8,7 @@ const NodeCache = require('node-cache');
 const winston = require('winston');
 require('dotenv').config();
 
-const bot = new Telegraf(process.env.TELEGRAM_TOKEN);
+const bot = new Telegraf(process.env.TELEGRAM_TOKEN || '');
 const cache = new NodeCache({ stdTTL: 180, checkperiod: 60 });
 const logger = winston.createLogger({
   level: 'info',
@@ -20,7 +20,7 @@ const logger = winston.createLogger({
 });
 
 const COINS = ['BTC-USDT', 'ETH-USDT', 'BNB-USDT', 'ADA-USDT', 'XRP-USDT'];
-const GROUP_ID = process.env.GROUP_ID || '-100123456789';
+const GROUP_ID = '-1002869335730'; // @tradingroup95
 const sentMessages = new Set();
 let isBitcoinMonitoringPaused = false;
 let pauseEndTime = 0;
@@ -32,11 +32,8 @@ const db = new sqlite3.Database(':memory:', (err) => {
   db.run('CREATE TABLE IF NOT EXISTS chat_history (chatId TEXT, message TEXT, timestamp INTEGER)');
 });
 
-const binance = new ccxt.binance({
-  apiKey: process.env.BINANCE_API_KEY,
-  secret: process.env.BINANCE_API_SECRET,
-  enableRateLimit: true
-});
+// Binance public endpoint'ler için kimlik doğrulama olmadan
+const binance = new ccxt.binance({ enableRateLimit: true });
 
 async function fetchHttpKlines(symbol, timeframe, startTime, endTime) {
   try {
@@ -66,11 +63,7 @@ async function getCurrentPrice(symbol) {
 }
 
 async function startWebSocket(symbol, targetPrice, chatId, callback) {
-  const ws = new ccxt.binance({
-    apiKey: process.env.BINANCE_API_KEY,
-    secret: process.env.BINANCE_API_SECRET,
-    enableRateLimit: true
-  });
+  const ws = new ccxt.binance({ enableRateLimit: true });
 
   const stop = async () => {
     logger.info(`WebSocket durduruldu: ${symbol}`);
@@ -954,29 +947,32 @@ app.listen(port, () => {
   logger.info(`Server ${port} portunda çalışıyor`);
 });
 
-// Bot Başlatma ve Hata Yönetimi
+// Bot Başlatma
+if (!process.env.TELEGRAM_TOKEN) {
+  logger.error('Hata: TELEGRAM_TOKEN eksik! Lütfen Heroku ortam değişkenlerini kontrol et.');
+  process.exit(1);
+}
+
 bot.launch().then(() => {
   logger.info('Bot başlatıldı kanka! 🚀');
 }).catch((error) => {
-  logger.error('Bot başlatma hatası:', error);
+  logger.error('Bot başlatma hatası:', error.message);
+  process.exit(1);
 });
 
 process.on('SIGTERM', async () => {
   logger.info('SIGTERM alındı, bot kapatılıyor...');
   try {
-    // Botun çalışıp çalışmadığını kontrol et
-    if (bot.botInfo) {
-      await bot.stop();
-    }
+    if (bot.botInfo) await bot.stop();
     await db.close();
     logger.info('Bot ve veritabanı başarıyla kapatıldı.');
     process.exit(0);
   } catch (error) {
-    logger.error('Kapatma sırasında hata:', error);
+    logger.error('Kapatma sırasında hata:', error.message);
     process.exit(1);
   }
 });
 
 process.on('unhandledRejection', (error) => {
-  logger.error('Unhandled Rejection:', error);
+  logger.error('Unhandled Rejection:', error.message);
 });
