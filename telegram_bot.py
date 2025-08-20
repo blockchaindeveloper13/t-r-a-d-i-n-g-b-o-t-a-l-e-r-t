@@ -45,7 +45,7 @@ COINS = {
 }
 
 # Seçilen zaman dilimi
-TIMEFRAMES = ['1h']
+TIMEFRAMES = ['5m', '15m', '1h', '4h']
 
 # Yetkili kullanıcı
 AUTHORIZED_USER_ID = 1616739367
@@ -91,45 +91,45 @@ class KuCoinClient:
             self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60))  # 60 saniye timeout
             logger.info("KuCoin session başlatıldı. 🚀")
 
-    async def fetch_kline_data(self, symbol, interval, count=50):
-        await self.initialize()
-        try:
-            kucoin_intervals = {'1h': '1hour'}
-            if interval not in kucoin_intervals:
-                logger.error(f"Geçersiz aralık {interval} KuCoin için. 😞")
-                return {'data': []}
-            symbol_kucoin = symbol.replace('USDT', '-USDT')
-            url = f"{self.base_url}/api/v1/market/candles?type={kucoin_intervals[interval]}&symbol={symbol_kucoin}"
-            async with self.session.get(url) as response:
-                logger.info(f"Requesting KuCoin URL: {url}")
-                if response.status == 200:
-                    response_data = await response.json()
-                    logger.info(f"Raw KuCoin response: {response_data}")
-                    if response_data['code'] == '200000' and response_data['data']:
-                        data = [
-                            [int(candle[0]) * 1000, float(candle[1]), float(candle[2]), float(candle[3]),
-                             float(candle[4]), float(candle[5]), int(candle[0]) * 1000, float(candle[6])]
-                            for candle in response_data['data']
-                        ][:count]
-                        df = pd.DataFrame(data, columns=['timestamp', 'open', 'close', 'high', 'low', 'volume', 'close_time', 'quote_volume'])
-                        df = validate_data(df)
-                        if df.empty:
-                            logger.warning(f"Geçersiz veya boş veri sonrası DataFrame boş: {symbol} ({interval}) 😕")
-                            return {'data': []}
-                        logger.info(f"KuCoin kline response for {symbol} ({interval}): {df.head().to_dict()}")
-                        return {'data': df.values.tolist()}
-                    else:
-                        logger.warning(f"No KuCoin kline data for {symbol} ({interval}): {response_data}")
-                        return {'data': []}
-                else:
-                    logger.error(f"Failed to fetch KuCoin kline data for {symbol} ({interval}): {response.status} 😢")
-                    return {'data': []}
-        except Exception as e:
-            logger.error(f"Error fetching KuCoin kline data for {symbol} ({interval}): {e} 😞")
+   async def fetch_kline_data(self, symbol, interval, count=50):
+    await self.initialize()
+    try:
+        kucoin_intervals = {'5m': '5min', '15m': '15min', '1h': '1hour', '4h': '4hour'}
+        if interval not in kucoin_intervals:
+            logger.error(f"Geçersiz aralık {interval} KuCoin için. 😞")
             return {'data': []}
-        finally:
-            await asyncio.sleep(0.5)
-            gc.collect()
+        symbol_kucoin = symbol.replace('USDT', '-USDT')
+        url = f"{self.base_url}/api/v1/market/candles?type={kucoin_intervals[interval]}&symbol={symbol_kucoin}"
+        async with self.session.get(url) as response:
+            logger.info(f"Requesting KuCoin URL: {url}")
+            if response.status == 200:
+                response_data = await response.json()
+                logger.info(f"Raw KuCoin response: {response_data}")
+                if response_data['code'] == '200000' and response_data['data']:
+                    data = [
+                        [int(candle[0]) * 1000, float(candle[1]), float(candle[2]), float(candle[3]),
+                         float(candle[4]), float(candle[5]), int(candle[0]) * 1000, float(candle[6])]
+                        for candle in response_data['data']
+                    ][:count]
+                    df = pd.DataFrame(data, columns=['timestamp', 'open', 'close', 'high', 'low', 'volume', 'close_time', 'quote_volume'])
+                    df = validate_data(df)
+                    if df.empty:
+                        logger.warning(f"Geçersiz veya boş veri sonrası DataFrame boş: {symbol} ({interval}) 😕")
+                        return {'data': []}
+                    logger.info(f"KuCoin kline response for {symbol} ({interval}): {df.head().to_dict()}")
+                    return {'data': df.values.tolist()}
+                else:
+                    logger.warning(f"No KuCoin kline data for {symbol} ({interval}): {response_data}")
+                    return {'data': []}
+            else:
+                logger.error(f"Failed to fetch KuCoin kline data for {symbol} ({interval}): {response.status} 😢")
+                return {'data': []}
+    except Exception as e:
+        logger.error(f"Error fetching KuCoin kline data for {symbol} ({interval}): {e} 😞")
+        return {'data': []}
+    finally:
+        await asyncio.sleep(0.5)
+        gc.collect()
 
     async def fetch_order_book(self, symbol):
         await self.initialize()
@@ -386,88 +386,103 @@ class GrokClient:
                 gc.collect()
 
     def _create_analysis_prompt(self, market_data, symbol):
-        indicators = calculate_indicators(market_data['klines'], market_data['order_book'], symbol)
-        fib_levels = indicators.get('fibonacci_levels', [0.0, 0.0, 0.0, 0.0, 0.0])
-        
-        indicators_formatted = []
-        for interval in TIMEFRAMES:
-            ma50 = indicators.get(f'ma_{interval}', {}).get('ma50', 0.0)
-            rsi = indicators.get(f'rsi_{interval}', 50.0)
-            atr = indicators.get(f'atr_{interval}', 0.0)
-            macd = indicators.get(f'macd_{interval}', {}).get('macd', 0.0)
-            signal = indicators.get(f'macd_{interval}', {}).get('signal', 0.0)
-            bb_upper = indicators.get(f'bbands_{interval}', {}).get('upper', 0.0)
-            bb_lower = indicators.get(f'bbands_{interval}', {}).get('lower', 0.0)
-            stoch_k = indicators.get(f'stoch_{interval}', {}).get('k', 0.0)
-            stoch_d = indicators.get(f'stoch_{interval}', {}).get('d', 0.0)
-            obv = indicators.get(f'obv_{interval}', 0.0)
-            indicators_formatted.append(
-                f"⏰ {interval} Göstergeleri:\n"
-                f"  📈 MA50: {ma50:.2f}\n"
-                f"  📊 RSI: {rsi:.2f}\n"
-                f"  ⚡ ATR: {atr:.2f}%\n"
-                f"  📉 MACD: {macd:.2f}, Sinyal: {signal:.2f}\n"
-                f"  🎢 Bollinger: Üst={bb_upper:.2f}, Alt={bb_lower:.2f}\n"
-                f"  🚀 Stochastic: %K={stoch_k:.2f}, %D={stoch_d:.2f}\n"
-                f"  📦 OBV: {obv:.2f}\n"
-            )
-
-        raw_data_formatted = []
-        for interval in TIMEFRAMES:
-            raw_data = indicators.get(f'raw_data_{interval}', {'high': 0.0, 'low': 0.0, 'close': 0.0})
-            raw_data_formatted.append(f"{interval}: High=${raw_data['high']:.2f}, Low=${raw_data['low']:.2f}, Close=${raw_data['close']:.2f}")
-
-        prompt = (
-            f"{symbol} için vadeli işlem analizi yap (spot piyasa verilerine dayalı). Yanıt tamamen Türkçe, detaylı ama kısa (maks 3000 karakter) olmalı. 😎 "
-            f"KALIN YAZI İÇİN ** KULLANMA, bunun yerine düz metin veya emoji kullan. 🚫 "
-            f"Sadece tek bir long ve short pozisyon önerisi sun (giriş fiyatı, take-profit, stop-loss, kaldıraç, risk/ödül oranı ve trend tahmini). "
-            f"Değerler tamamen senin analizine dayansın, kodda hesaplama yapılmasın. 🧠 "
-            f"Toplu değerlendirme (yorum) detaylı, emoji dolu ve samimi olsun, ama özlü yaz (maks 1500 karakter). 🎉 "
-            f"ATR > %5 ise yatırımdan uzak dur uyarısı ekle, ancak teorik pozisyon parametrelerini sağla. ⚠️ "
-            f"Spot verilerini vadeli işlem için uyarla. Doğal, profesyonel ama samimi bir üslup kullan. 😄 "
-            f"Giriş, take-profit ve stop-loss’u nasıl belirlediğini, hangi göstergelere (MA50, RSI, MACD, Bollinger, Stochastic, OBV) dayandığını kısaca açıkla. "
-            f"Eğer veri eksikse (örn. MACD veya Fibonacci), mevcut verilere dayanarak kısa vadeli trend tahmini yap. 📉 "
-            f"Tüm veriler KuCoin’den alındı. Uzun vadeli veri eksikse, kısa vadeli verilere odaklan ve belirt. 📊\n\n"
-            f"### Destek ve Direnç Hesaplama\n"
-            f"Destek ve direnç seviyelerini pivot nokta yöntemiyle hesapla:\n"
-            f"- Pivot = (High + Low + Close) / 3\n"
-            f"- Range = High - Low\n"
-            f"- Destek Seviyeleri: [Pivot - Range * 0.5, Pivot - Range * 0.618, Pivot - Range]\n"
-            f"- Direnç Seviyeleri: [Pivot + Range * 0.5, Pivot + Range * 0.618, Pivot + Range]\n"
-            f"Stop-loss için son kapanış fiyatından ATR’nin %50’sini düşerek veya en yakın destek seviyesini kullan. 🛑 "
-            f"Seviyeleri analizde kullan ve karşılaştırma yap. Eğer ham veriler eksikse, durumu yorumda belirt. 🔍\n\n"
-            f"### Ham Veriler\n"
-            f"{', '.join(raw_data_formatted)}\n\n"
-            f"### Diğer Veriler\n"
-            f"- Mevcut Fiyat: {market_data['price']:.2f} USDT 💰\n"
-            f"- 24 Saatlik Değişim: {market_data.get('price_change_24hr', 0.0):.2f}% 📈\n"
-            f"- Göstergeler:\n"
-            f"{''.join(indicators_formatted)}\n"
-            f"- Fibonacci Seviyeleri: {', '.join([f'${x:.2f}' for x in fib_levels])} 📏\n"
-            f"Çıktı formatı:\n"
-            f"{symbol} Vadeli Analiz ({datetime.now().strftime('%Y-%m-%d %H:%M')}) ⏰\n"
-            f"Zaman Dilimleri: {', '.join(TIMEFRAMES)} 🕒\n"
-            f"Long Pozisyon:\n"
-            f"- Giriş: $X 💵\n"
-            f"- Take-Profit: $Y 🎯\n"
-            f"- Stop-Loss: $Z 🛑\n"
-            f"- Kaldıraç: Nx ⚙️\n"
-            f"- Risk/Ödül: A:B 📊\n"
-            f"- Trend: [Yükseliş/Düşüş/Nötr] 🚀📉\n"
-            f"Short Pozisyon:\n"
-            f"- Giriş: $X 💵\n"
-            f"- Take-Profit: $Y 🎯\n"
-            f"- Stop-Loss: $Z 🛑\n"
-            f"- Kaldıraç: Nx ⚙️\n"
-            f"- Risk/Ödül: A:B 📊\n"
-            f"- Trend: [Yükseliş/Düşüş/Nötr] 🚀📉\n"
-            f"Destek: [Hesaplanan seviyeler] 🛡️\n"
-            f"Direnç: [Hesaplanan seviyeler] 🏰\n"
-            f"Fibonacci: {', '.join([f'${x:.2f}' for x in fib_levels])} 📏\n"
-            f"Volatilite: {indicators.get('atr_1h', 0.0):.2f}% ({'Yüksek, uzak dur! 😱' if indicators.get('atr_1h', 0.0) > 5 else 'Normal 😎'}) ⚡\n"
-            f"Yorum: [Kısa, öz ama detaylı açıkla, hangi göstergelere dayandığını, giriş/take-profit/stop-loss seçim gerekçesini, yüksek volatilite varsa neden yatırımdan uzak durulmalı belirt, emoji kullan, samimi ol! 🎉 Maks 1500 karakter. Karakter sayısını yazma. 🚫]\n"
+    indicators = calculate_indicators(market_data['klines'], market_data['order_book'], symbol)
+    fib_levels = indicators.get('fibonacci_levels', [0.0, 0.0, 0.0, 0.0, 0.0])
+    
+    indicators_formatted = []
+    for interval in TIMEFRAMES:
+        ma50 = indicators.get(f'ma_{interval}', {}).get('ma50', 0.0)
+        rsi = indicators.get(f'rsi_{interval}', 50.0)
+        atr = indicators.get(f'atr_{interval}', 0.0)
+        macd = indicators.get(f'macd_{interval}', {}).get('macd', 0.0)
+        signal = indicators.get(f'macd_{interval}', {}).get('signal', 0.0)
+        bb_upper = indicators.get(f'bbands_{interval}', {}).get('upper', 0.0)
+        bb_lower = indicators.get(f'bbands_{interval}', {}).get('lower', 0.0)
+        stoch_k = indicators.get(f'stoch_{interval}', {}).get('k', 0.0)
+        stoch_d = indicators.get(f'stoch_{interval}', {}).get('d', 0.0)
+        obv = indicators.get(f'obv_{interval}', 0.0)
+        indicators_formatted.append(
+            f"⏰ {interval} Göstergeleri:\n"
+            f"  📈 MA50: {ma50:.2f}\n"
+            f"  📊 RSI: {rsi:.2f}\n"
+            f"  ⚡ ATR: {atr:.2f}%\n"
+            f"  📉 MACD: {macd:.2f}, Sinyal: {signal:.2f}\n"
+            f"  🎢 Bollinger: Üst={bb_upper:.2f}, Alt={bb_lower:.2f}\n"
+            f"  🚀 Stochastic: %K={stoch_k:.2f}, %D={stoch_d:.2f}\n"
+            f"  📦 OBV: {obv:.2f}\n"
         )
-        return prompt
+
+    raw_data_formatted = []
+    for interval in TIMEFRAMES:
+        raw_data = indicators.get(f'raw_data_{interval}', {'high': 0.0, 'low': 0.0, 'close': 0.0})
+        raw_data_formatted.append(f"{interval}: High=${raw_data['high']:.2f}, Low=${raw_data['low']:.2f}, Close=${raw_data['close']:.2f}")
+
+    # Çoklu zaman dilimi trend tahmini
+    trend_summary = []
+    for interval in TIMEFRAMES:
+        rsi = indicators.get(f'rsi_{interval}', 50.0)
+        macd = indicators.get(f'macd_{interval}', {}).get('macd', 0.0)
+        signal = indicators.get(f'macd_{interval}', {}).get('signal', 0.0)
+        trend = "Nötr"
+        if rsi > 60 and macd > signal:
+            trend = "Yükseliş"
+        elif rsi < 40 and macd < signal:
+            trend = "Düşüş"
+        trend_summary.append(f"{interval}: {trend}")
+    
+    prompt = (
+        f"{symbol} için vadeli işlem analizi yap (spot piyasa verilerine dayalı). Yanıt tamamen Türkçe, detaylı ama kısa (maks 3000 karakter) olmalı. 😎 "
+        f"KALIN YAZI İÇİN ** KULLANMA, bunun yerine düz metin veya emoji kullan. 🚫 "
+        f"Sadece tek bir long ve short pozisyon önerisi sun (giriş fiyatı, take-profit, stop-loss, kaldıraç, risk/ödül oranı ve trend tahmini). "
+        f"Değerler tamamen senin analizine dayansın, kodda hesaplama yapılmasın. 🧠 "
+        f"Toplu değerlendirme (yorum) detaylı, emoji dolu ve samimi olsun, ama özlü yaz (maks 1500 karakter). 🎉 "
+        f"ATR > %5 ise yatırımdan uzak dur uyarısı ekle, ancak teorik pozisyon parametrelerini sağla. ⚠️ "
+        f"Spot verilerini vadeli işlem için uyarla. Doğal, profesyonel ama samimi bir üslup kullan. 😄 "
+        f"Giriş, take-profit ve stop-loss’u nasıl belirlediğini, hangi göstergelere (MA50, RSI, MACD, Bollinger, Stochastic, OBV) dayandığını kısaca açıkla. "
+        f"Eğer veri eksikse (örn. MACD veya Fibonacci), mevcut verilere dayanarak kısa vadeli trend tahmini yap. 📉 "
+        f"Tüm veriler KuCoin’den alındı. Uzun vadeli veri eksikse, kısa vadeli verilere odaklan ve belirt. 📊\n\n"
+        f"### Çoklu Zaman Dilimi Trendi\n"
+        f"{', '.join(trend_summary)}\n\n"
+        f"### Destek ve Direnç Hesaplama\n"
+        f"Destek ve direnç seviyelerini pivot nokta yöntemiyle hesapla:\n"
+        f"- Pivot = (High + Low + Close) / 3\n"
+        f"- Range = High - Low\n"
+        f"- Destek Seviyeleri: [Pivot - Range * 0.5, Pivot - Range * 0.618, Pivot - Range]\n"
+        f"- Direnç Seviyeleri: [Pivot + Range * 0.5, Pivot + Range * 0.618, Pivot + Range]\n"
+        f"Stop-loss için son kapanış fiyatından ATR’nin %50’sini düşerek veya en yakın destek seviyesini kullan. 🛑 "
+        f"Seviyeleri analizde kullan ve karşılaştırma yap. Eğer ham veriler eksikse, durumu yorumda belirt. 🔍\n\n"
+        f"### Ham Veriler\n"
+        f"{', '.join(raw_data_formatted)}\n\n"
+        f"### Diğer Veriler\n"
+        f"- Mevcut Fiyat: {market_data['price']:.2f} USDT 💰\n"
+        f"- 24 Saatlik Değişim: {market_data.get('price_change_24hr', 0.0):.2f}% 📈\n"
+        f"- Göstergeler:\n"
+        f"{''.join(indicators_formatted)}\n"
+        f"- Fibonacci Seviyeleri: {', '.join([f'${x:.2f}' for x in fib_levels])} 📏\n"
+        f"Çıktı formatı:\n"
+        f"{symbol} Vadeli Analiz ({datetime.now().strftime('%Y-%m-%d %H:%M')}) ⏰\n"
+        f"Zaman Dilimleri: {', '.join(TIMEFRAMES)} 🕒\n"
+        f"Long Pozisyon:\n"
+        f"- Giriş: $X 💵\n"
+        f"- Take-Profit: $Y 🎯\n"
+        f"- Stop-Loss: $Z 🛑\n"
+        f"- Kaldıraç: Nx ⚙️\n"
+        f"- Risk/Ödül: A:B 📊\n"
+        f"- Trend: [Yükseliş/Düşüş/Nötr] 🚀📉\n"
+        f"Short Pozisyon:\n"
+        f"- Giriş: $X 💵\n"
+        f"- Take-Profit: $Y 🎯\n"
+        f"- Stop-Loss: $Z 🛑\n"
+        f"- Kaldıraç: Nx ⚙️\n"
+        f"- Risk/Ödül: A:B 📊\n"
+        f"- Trend: [Yükseliş/Düşüş/Nötr] 🚀📉\n"
+        f"Destek: [Hesaplanan seviyeler] 🛡️\n"
+        f"Direnç: [Hesaplanan seviyeler] 🏰\n"
+        f"Fibonacci: {', '.join([f'${x:.2f}' for x in fib_levels])} 📏\n"
+        f"Volatilite: {indicators.get('atr_1h', 0.0):.2f}% ({'Yüksek, uzak dur! 😱' if indicators.get('atr_1h', 0.0) > 5 else 'Normal 😎'}) ⚡\n"
+        f"Yorum: [Kısa, öz ama detaylı açıkla, hangi göstergelere dayandığını, giriş/take-profit/stop-loss seçim gerekçesini, yüksek volatilite varsa neden yatırımdan uzak durulmalı belirt, emoji kullan, samimi ol! 🎉 Maks 1500 karakter. Karakter sayısını yazma. 🚫]\n"
+    )
+    return prompt
 
 class Storage:
     def __init__(self):
@@ -855,36 +870,34 @@ def calculate_indicators(kline_data, order_book, symbol):
                 f'raw_data_{interval}': {'high': 0.0, 'low': 0.0, 'close': 0.0}
             })
 
-    # Fibonacci seviyeleri
-    for interval in TIMEFRAMES:
-        kline = kline_data.get(interval, {}).get('data', [])
-        if kline and len(kline) >= 10:
-            df = pd.DataFrame(kline, columns=['timestamp', 'open', 'close', 'high', 'low', 'volume', 'close_time', 'quote_volume'])
-            df[['high', 'low']] = df[['high', 'low']].astype(float)
-            df = df.dropna()
-            if not df.empty:
-                try:
-                    high = df['high'].tail(10).max()
-                    low = df['low'].tail(10).min()
-                    if pd.notnull(high) and pd.notnull(low) and high >= low:
-                        diff = high - low
-                        indicators['fibonacci_levels'] = [
-                            float(low + diff * 0.236),
-                            float(low + diff * 0.382),
-                            float(low + diff * 0.5),
-                            float(low + diff * 0.618),
-                            float(low + diff * 0.786)
-                        ]
-                        logger.info(f"{symbol} için {interval} aralığında Fibonacci seviyeleri hesaplandı: {indicators['fibonacci_levels']} 📏")
-                    else:
-                        indicators['fibonacci_levels'] = [0.0, 0.0, 0.0, 0.0, 0.0]
-                except Exception as e:
-                    logger.error(f"{symbol} için {interval} aralığında Fibonacci hatası: {e} 😞")
+    # Fibonacci seviyeleri (4h için hesaplanıyor, daha uzun vadeli trend için)
+    kline_4h = kline_data.get('4h', {}).get('data', [])
+    if kline_4h and len(kline_4h) >= 10:
+        df = pd.DataFrame(kline_4h, columns=['timestamp', 'open', 'close', 'high', 'low', 'volume', 'close_time', 'quote_volume'])
+        df[['high', 'low']] = df[['high', 'low']].astype(float)
+        df = df.dropna()
+        if not df.empty:
+            try:
+                high = df['high'].tail(10).max()
+                low = df['low'].tail(10).min()
+                if pd.notnull(high) and pd.notnull(low) and high >= low:
+                    diff = high - low
+                    indicators['fibonacci_levels'] = [
+                        float(low + diff * 0.236),
+                        float(low + diff * 0.382),
+                        float(low + diff * 0.5),
+                        float(low + diff * 0.618),
+                        float(low + diff * 0.786)
+                    ]
+                    logger.info(f"{symbol} için 4h aralığında Fibonacci seviyeleri hesaplandı: {indicators['fibonacci_levels']} 📏")
+                else:
                     indicators['fibonacci_levels'] = [0.0, 0.0, 0.0, 0.0, 0.0]
-                break
-        else:
-            logger.warning(f"{symbol} için Fibonacci için yetersiz veri ({len(kline)} < 10) 😕")
-            indicators['fibonacci_levels'] = [0.0, 0.0, 0.0, 0.0, 0.0]
+            except Exception as e:
+                logger.error(f"{symbol} için 4h aralığında Fibonacci hatası: {e} 😞")
+                indicators['fibonacci_levels'] = [0.0, 0.0, 0.0, 0.0, 0.0]
+    else:
+        logger.warning(f"{symbol} için Fibonacci için yetersiz veri (4h, {len(kline_4h)} < 10) 😕")
+        indicators['fibonacci_levels'] = [0.0, 0.0, 0.0, 0.0, 0.0]
 
     if order_book.get('bids') and order_book.get('asks'):
         try:
@@ -895,12 +908,11 @@ def calculate_indicators(kline_data, order_book, symbol):
         except Exception as e:
             logger.error(f"{symbol} için sipariş defteri oranı hatası: {e} 😞")
             indicators['bid_ask_ratio'] = 0.0
-        else:
-            indicators['bid_ask_ratio'] = 0.0
-            logger.warning(f"{symbol} için sipariş defterinde bid veya ask verisi yok 😕")
+    else:
+        indicators['bid_ask_ratio'] = 0.0
+        logger.warning(f"{symbol} için sipariş defterinde bid veya ask verisi yok 😕")
 
     return indicators
-
 class TelegramBot:
     def __init__(self):
         self.group_id = int(os.getenv('GROUP_ID', '-1002869335730'))
