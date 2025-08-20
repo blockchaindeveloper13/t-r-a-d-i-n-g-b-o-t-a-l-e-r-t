@@ -63,7 +63,7 @@ def validate_data(df):
     invalid_rows = df[df['high'] < df['low']]
     if not invalid_rows.empty:
         logger.warning(f"Geçersiz veri (high < low): {invalid_rows[['timestamp', 'high', 'low']].to_dict()}")
-        df.loc[df['high'] < df['low'], ['high', 'low']] = df.loc[df['high', 'low'], ['low', 'high']].values
+        df.loc[df['high'] < df['low'], ['high', 'low']] = df.loc[df['high'] < df['low'], ['low', 'high']].values
         logger.info("High ve Low sütunları yer değiştirildi. ✅")
 
     if (df[['open', 'high', 'low', 'close']] <= 0).any().any():
@@ -88,7 +88,7 @@ class KuCoinClient:
 
     async def initialize(self):
         if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession()
+            self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60))  # 60 saniye timeout
             logger.info("KuCoin session başlatıldı. 🚀")
 
     async def fetch_kline_data(self, symbol, interval, count=50):
@@ -378,141 +378,6 @@ class GrokClient:
                     return f"Kanka, {symbol} analizi yaparken API zaman aşımına uğradı. Tekrar deneyelim mi? 😅"
                 wait_time = (2 ** attempt) + random.uniform(0, 0.2)
                 logger.info(f"Timeout error, retrying in {wait_time:.2f} seconds")
-                await asyncio.sleep(wait_time)
-            except Exception as e:
-                logger.error(f"Grok 4 coin analysis error: {e} 😞")
-                return f"Kanka, {symbol} analizi yaparken bi’ şeyler ters gitti. Tekrar deneyelim mi? 😅"
-            finally:
-                gc.collect()
-
-    async def fetch_market_data(self, symbol):
-        await self.kucoin.initialize()
-        try:
-            klines = {}
-            for interval in TIMEFRAMES:
-                klines[interval] = await self.kucoin.fetch_kline_data(symbol, interval)
-                await asyncio.sleep(0.1)
-            order_book = await self.kucoin.fetch_order_book(symbol)
-            ticker = await self.kucoin.fetch_ticker(symbol)
-            ticker_24hr = await self.kucoin.fetch_24hr_ticker(symbol)
-            return {
-                'klines': klines,
-                'order_book': order_book,
-                'price': float(ticker.get('price', 0.0)),
-                'funding_rate': 0.0,
-                'price_change_24hr': float(ticker_24hr.get('priceChangePercent', 0.0))
-            }
-        except Exception as e:
-            logger.error(f"Error fetching market data for {symbol}: {e} 😞")
-            return None
-        finally:
-            await self.kucoin.close()
-
-    async def analyze_coin(self, symbol, chat_id):
-    logger.info(f"Analyzing coin {symbol} for chat_id: {chat_id}")
-    max_retries = 5  # Retry sayısını artırdık
-    for attempt in range(max_retries):
-        try:
-            market_data = await self.fetch_market_data(symbol)
-            if not market_data:
-                return f"Kanka, {symbol} için veri çekemedim. Başka bi’ coin mi bakalım? 😕"
-
-            prompt = self._create_analysis_prompt(market_data, symbol)
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "Sen bir kripto analiz botusun. Teknik analiz yap, samimi ve esprili bir dille Türkçe cevap ver. Grafik verilerini kullanıcıya anlat, trendleri belirt, alım-satım önerisi verme ama olasılıkları tartış. Analiz sonunda karakter sayısını yazma."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.7,
-                max_tokens=2000,  # max_tokens'ı azalttık
-                stream=False
-            )
-            response_text = response.choices[0].message.content
-            logger.info(f"Grok analysis for {symbol}: {response_text[:200]}...")
-            return response_text
-        except RateLimitError as e:
-            if attempt == max_retries - 1:
-                logger.error(f"Grok 4 coin analysis error after {max_retries} retries: {e} 😞")
-                return f"Kanka, {symbol} analizi yaparken API limitine takıldık. Bi’ süre sonra tekrar deneyelim mi? 😅"
-            wait_time = (2 ** attempt) + random.uniform(0, 0.2)
-            logger.info(f"Rate limit hit, retrying in {wait_time:.2f} seconds")
-            await asyncio.sleep(wait_time)
-        except aiohttp.ClientConnectionError as e:
-            if attempt == max_retries - 1:
-                logger.error(f"Grok 4 connection error: {e} 😞")
-                return f"Kanka, {symbol} analizi yaparken bağlantı koptu. Bi’ süre sonra tekrar deneyelim mi? 😅"
-            wait_time = (2 ** attempt) + random.uniform(0, 0.2)
-            logger.info(f"Connection error, retrying in {wait_time:.2f} seconds")
-            await asyncio.sleep(wait_time)
-        except asyncio.TimeoutError as e:
-            if attempt == max_retries - 1:
-                logger.error(f"Grok 4 coin analysis timeout after {max_retries} retries: {e} 😞")
-                return f"Kanka, {symbol} analizi yaparken API zaman aşımına uğradı. Tekrar deneyelim mi? 😅"
-            wait_time = (2 ** attempt) + random.uniform(0, 0.2)
-            logger.info(f"Timeout error, retrying in {wait_time:.2f} seconds")
-            await asyncio.sleep(wait_time)
-        except Exception as e:
-            logger.error(f"Grok 4 coin analysis error: {e} 😞")
-            return f"Kanka, {symbol} analizi yaparken bi’ şeyler ters gitti. Tekrar deneyelim mi? 😅"
-        finally:
-            gc.collect()
-
-    async def fetch_market_data(self, symbol):
-        await self.kucoin.initialize()
-        try:
-            klines = {}
-            for interval in TIMEFRAMES:
-                klines[interval] = await self.kucoin.fetch_kline_data(symbol, interval)
-                await asyncio.sleep(0.1)
-            order_book = await self.kucoin.fetch_order_book(symbol)
-            ticker = await self.kucoin.fetch_ticker(symbol)
-            ticker_24hr = await self.kucoin.fetch_24hr_ticker(symbol)
-            return {
-                'klines': klines,
-                'order_book': order_book,
-                'price': float(ticker.get('price', 0.0)),
-                'funding_rate': 0.0,
-                'price_change_24hr': float(ticker_24hr.get('priceChangePercent', 0.0))
-            }
-        except Exception as e:
-            logger.error(f"Error fetching market data for {symbol}: {e} 😞")
-            return None
-        finally:
-            await self.kucoin.close()
-
-    async def analyze_coin(self, symbol, chat_id):
-        logger.info(f"Analyzing coin {symbol} for chat_id: {chat_id}")
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                market_data = await self.fetch_market_data(symbol)
-                if not market_data:
-                    return f"Kanka, {symbol} için veri çekemedim. Başka bi’ coin mi bakalım? 😕"
-
-                prompt = self._create_analysis_prompt(market_data, symbol)
-                response_text = ""
-                stream = await self.client.chat.completions.create(
-                  model=self.model,
-                  messages=[
-                     {"role": "system", "content": "Sen bir kripto analiz botusun. Teknik analiz yap, samimi ve esprili bir dille Türkçe cevap ver. Grafik verilerini kullanıcıya anlat, trendleri belirt, alım-satım önerisi verme ama olasılıkları tartış. Analiz sonunda karakter sayısını yazma."},
-                     {"role": "user", "content": prompt}
-                  ],
-                  temperature=0.7,
-                  max_tokens=4000,  # Burayı artırdık
-                  stream=False
-                 )
-                async for chunk in stream:
-                    if chunk.choices[0].delta.content:
-                        response_text += chunk.choices[0].delta.content
-                logger.info(f"Grok analysis for {symbol}: {response_text[:200]}...")
-                return response_text
-            except RateLimitError as e:
-                if attempt == max_retries - 1:
-                    logger.error(f"Grok 4 coin analysis error after {max_retries} retries: {e} 😞")
-                    return f"Kanka, {symbol} analizi yaparken API limitine takıldık. Bi’ süre sonra tekrar deneyelim mi? 😅"
-                wait_time = (2 ** attempt) + random.uniform(0, 0.1)
-                logger.info(f"Rate limit hit, retrying in {wait_time:.2f} seconds")
                 await asyncio.sleep(wait_time)
             except Exception as e:
                 logger.error(f"Grok 4 coin analysis error: {e} 😞")
@@ -1030,9 +895,9 @@ def calculate_indicators(kline_data, order_book, symbol):
         except Exception as e:
             logger.error(f"{symbol} için sipariş defteri oranı hatası: {e} 😞")
             indicators['bid_ask_ratio'] = 0.0
-    else:
-        indicators['bid_ask_ratio'] = 0.0
-        logger.warning(f"{symbol} için sipariş defterinde bid veya ask verisi yok 😕")
+        else:
+            indicators['bid_ask_ratio'] = 0.0
+            logger.warning(f"{symbol} için sipariş defterinde bid veya ask verisi yok 😕")
 
     return indicators
 
@@ -1048,6 +913,7 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("clear_7days", self.clear_7days))
         self.app.add_handler(CommandHandler("clear_3days", self.clear_3days))
         self.app.add_handler(CommandHandler("clear_all", self.clear_all))
+        self.app.add_handler(CommandHandler("full_analysis", self.check_full_analysis))
         self.app.add_handler(CallbackQueryHandler(self.button))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text_message))
         self.active_analyses = {}
@@ -1064,9 +930,22 @@ class TelegramBot:
             "Kanka, hadi bakalım! Coin analizi mi yapalım, yoksa başka muhabbet mi çevirelim? 😎\n"
             "Örnek: 'ADA analiz', 'nasılsın', 'geçmiş'.\n"
             "Veritabanı temizleme için: /clear_7days, /clear_3days, /clear_all (sadece sen kullanabilirsin!).\n"
+            "Son analizi görmek için: /full_analysis\n"
         )
         await update.message.reply_text(response, reply_markup=InlineKeyboardMarkup(keyboard))
         self.storage.save_conversation(update.effective_chat.id, update.message.text, response)
+
+    async def check_full_analysis(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        symbol = self.storage.get_last_symbol(update.effective_chat.id)
+        if symbol:
+            full_analysis = self.storage.get_latest_analysis(symbol)
+            if full_analysis:
+                await update.message.reply_text(f"Kanka, {symbol} için tam analiz:\n{full_analysis}")
+            else:
+                await update.message.reply_text(f"Kanka, {symbol} için analiz bulunamadı. 😕")
+        else:
+            await update.message.reply_text("Kanka, son sembol bulunamadı. Bi’ coin seç! 😎")
+        self.storage.save_conversation(update.effective_chat.id, "Tam analiz kontrolü", full_analysis or "Analiz yok", symbol)
 
     async def clear_7days(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         response = await self.storage.clear_7days(update.effective_chat.id)
@@ -1226,6 +1105,7 @@ class TelegramBot:
         if len(message) <= max_length:
             await self.app.bot.send_message(chat_id=chat_id, text=message)
             self.storage.save_conversation(chat_id, symbol, message, symbol)
+            logger.info(f"Tek parça mesaj gönderildi: {message[:200]}...")
             return
 
         sections = []
@@ -1244,6 +1124,7 @@ class TelegramBot:
             part_message = f"{symbol} Analiz - Bölüm {i}/{len(sections)} ⏰\n{section}"
             await self.app.bot.send_message(chat_id=chat_id, text=part_message)
             self.storage.save_conversation(chat_id, symbol, part_message, symbol)
+            logger.info(f"Mesaj bölümü {i}/{len(sections)} gönderildi: {part_message[:200]}...")
             await asyncio.sleep(0.5)  # Telegram rate limit için kısa bekleme
 
     async def process_coin(self, symbol, chat_id):
