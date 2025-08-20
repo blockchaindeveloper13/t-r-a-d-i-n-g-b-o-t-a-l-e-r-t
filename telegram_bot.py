@@ -327,47 +327,54 @@ class GrokClient:
             await self.kucoin.close()
 
     async def analyze_coin(self, symbol, chat_id):
-        logger.info(f"Analyzing coin {symbol} for chat_id: {chat_id}")
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                market_data = await self.fetch_market_data(symbol)
-                if not market_data:
-                    return f"Kanka, {symbol} için veri çekemedim. Başka bi’ coin mi bakalım? 😕"
+    logger.info(f"Analyzing coin {symbol} for chat_id: {chat_id}")
+    max_retries = 5  # Retry sayısını artırdık
+    for attempt in range(max_retries):
+        try:
+            market_data = await self.fetch_market_data(symbol)
+            if not market_data:
+                return f"Kanka, {symbol} için veri çekemedim. Başka bi’ coin mi bakalım? 😕"
 
-                prompt = self._create_analysis_prompt(market_data, symbol)
-                response = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": "Sen bir kripto analiz botusun. Teknik analiz yap, samimi ve esprili bir dille Türkçe cevap ver. Grafik verilerini kullanıcıya anlat, trendleri belirt, alım-satım önerisi verme ama olasılıkları tartış. Analiz sonunda karakter sayısını yazma."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.7,
-                    max_tokens=4000,
-                    stream=False
-                )
-                response_text = response.choices[0].message.content
-                logger.info(f"Grok analysis for {symbol}: {response_text[:200]}...")
-                return response_text
-            except RateLimitError as e:
-                if attempt == max_retries - 1:
-                    logger.error(f"Grok 4 coin analysis error after {max_retries} retries: {e} 😞")
-                    return f"Kanka, {symbol} analizi yaparken API limitine takıldık. Bi’ süre sonra tekrar deneyelim mi? 😅"
-                wait_time = (2 ** attempt) + random.uniform(0, 0.1)
-                logger.info(f"Rate limit hit, retrying in {wait_time:.2f} seconds")
-                await asyncio.sleep(wait_time)
-            except aiohttp.ClientConnectionError as e:
+            prompt = self._create_analysis_prompt(market_data, symbol)
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "Sen bir kripto analiz botusun. Teknik analiz yap, samimi ve esprili bir dille Türkçe cevap ver. Grafik verilerini kullanıcıya anlat, trendleri belirt, alım-satım önerisi verme ama olasılıkları tartış. Analiz sonunda karakter sayısını yazma."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+                max_tokens=2000,  # max_tokens'ı azalttık
+                stream=False
+            )
+            response_text = response.choices[0].message.content
+            logger.info(f"Grok analysis for {symbol}: {response_text[:200]}...")
+            return response_text
+        except RateLimitError as e:
+            if attempt == max_retries - 1:
+                logger.error(f"Grok 4 coin analysis error after {max_retries} retries: {e} 😞")
+                return f"Kanka, {symbol} analizi yaparken API limitine takıldık. Bi’ süre sonra tekrar deneyelim mi? 😅"
+            wait_time = (2 ** attempt) + random.uniform(0, 0.2)
+            logger.info(f"Rate limit hit, retrying in {wait_time:.2f} seconds")
+            await asyncio.sleep(wait_time)
+        except aiohttp.ClientConnectionError as e:
+            if attempt == max_retries - 1:
                 logger.error(f"Grok 4 connection error: {e} 😞")
-                if attempt == max_retries - 1:
-                    return f"Kanka, {symbol} analizi yaparken bağlantı koptu. Bi’ süre sonra tekrar deneyelim mi? 😅"
-                wait_time = (2 ** attempt) + random.uniform(0, 0.1)
-                logger.info(f"Connection error, retrying in {wait_time:.2f} seconds")
-                await asyncio.sleep(wait_time)
-            except Exception as e:
-                logger.error(f"Grok 4 coin analysis error: {e} 😞")
-                return f"Kanka, {symbol} analizi yaparken bi’ şeyler ters gitti. Tekrar deneyelim mi? 😅"
-            finally:
-                gc.collect()
+                return f"Kanka, {symbol} analizi yaparken bağlantı koptu. Bi’ süre sonra tekrar deneyelim mi? 😅"
+            wait_time = (2 ** attempt) + random.uniform(0, 0.2)
+            logger.info(f"Connection error, retrying in {wait_time:.2f} seconds")
+            await asyncio.sleep(wait_time)
+        except asyncio.TimeoutError as e:
+            if attempt == max_retries - 1:
+                logger.error(f"Grok 4 coin analysis timeout after {max_retries} retries: {e} 😞")
+                return f"Kanka, {symbol} analizi yaparken API zaman aşımına uğradı. Tekrar deneyelim mi? 😅"
+            wait_time = (2 ** attempt) + random.uniform(0, 0.2)
+            logger.info(f"Timeout error, retrying in {wait_time:.2f} seconds")
+            await asyncio.sleep(wait_time)
+        except Exception as e:
+            logger.error(f"Grok 4 coin analysis error: {e} 😞")
+            return f"Kanka, {symbol} analizi yaparken bi’ şeyler ters gitti. Tekrar deneyelim mi? 😅"
+        finally:
+            gc.collect()
 
     async def fetch_market_data(self, symbol):
         await self.kucoin.initialize()
