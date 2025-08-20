@@ -5,9 +5,11 @@ import logging
 import asyncio
 import aiohttp
 import signal
+import random
+import gc
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, RateLimitError
 from aiohttp import web
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
@@ -42,8 +44,11 @@ COINS = {
     "MKRUSDT": ["mkr", "mkrusdt", "maker"]
 }
 
-# Seçilen zaman dilimleri
-TIMEFRAMES = ['5m', '15m', '60m', '6h']
+# Seçilen zaman dilimi (bellek optimizasyonu için tek zaman dilimi)
+TIMEFRAMES = ['1h']
+
+# Yetkili kullanıcı (senin chat_id)
+AUTHORIZED_USER_ID = 1616739367
 
 def validate_data(df):
     """Veride eksik veya geçersiz değerleri kontrol et ve düzelt. 🛠️"""
@@ -86,12 +91,10 @@ class KuCoinClient:
             self.session = aiohttp.ClientSession()
             logger.info("KuCoin session başlatıldı. 🚀")
 
-    async def fetch_kline_data(self, symbol, interval, count=200):
+    async def fetch_kline_data(self, symbol, interval, count=3):
         await self.initialize()
         try:
-            kucoin_intervals = {
-                '5m': '5min', '15m': '15min', '60m': '1hour', '6h': '6hour'
-            }
+            kucoin_intervals = {'1h': '1hour'}
             if interval not in kucoin_intervals:
                 logger.error(f"Geçersiz aralık {interval} KuCoin için. 😞")
                 return {'data': []}
@@ -125,7 +128,8 @@ class KuCoinClient:
             logger.error(f"Error fetching KuCoin kline data for {symbol} ({interval}): {e} 😞")
             return {'data': []}
         finally:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1)
+            gc.collect()
 
     async def fetch_order_book(self, symbol):
         await self.initialize()
@@ -154,7 +158,8 @@ class KuCoinClient:
             logger.error(f"Error fetching KuCoin order book for {symbol}: {e} 😞")
             return {'bids': [], 'asks': [], 'timestamp': 0}
         finally:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1)
+            gc.collect()
 
     async def fetch_ticker(self, symbol):
         await self.initialize()
@@ -179,7 +184,8 @@ class KuCoinClient:
             logger.error(f"Error fetching KuCoin ticker for {symbol}: {e} 😞")
             return {'symbol': symbol, 'price': '0.0'}
         finally:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1)
+            gc.collect()
 
     async def fetch_24hr_ticker(self, symbol):
         await self.initialize()
@@ -215,7 +221,8 @@ class KuCoinClient:
             logger.error(f"Error fetching KuCoin 24hr ticker for {symbol}: {e} 😞")
             return {'priceChangePercent': '0.0'}
         finally:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1)
+            gc.collect()
 
     async def validate_symbol(self, symbol):
         await self.initialize()
@@ -230,39 +237,121 @@ class KuCoinClient:
             logger.error(f"Error validating symbol {symbol}: {e} 😞")
             return False
         finally:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1)
+            gc.collect()
 
     async def close(self):
         if self.session and not self.session.closed:
             await self.session.close()
             self.session = None
             logger.info("KuCoin session kapatıldı. 🛑")
+            gc.collect()
 
 class GrokClient:
     """Grok 4 API ile analiz yapar ve doğal dil işleme sağlar. 🧠✨"""
     def __init__(self):
         self.client = AsyncOpenAI(api_key=os.getenv('GROK_API_KEY'), base_url="https://api.x.ai/v1")
-        self.model = "grok-4-0709"  # Standart Grok 4 modeli
+        self.model = "grok-4-0709"
 
-    async def analyze_coin(self, symbol, data):
-        fib_levels = data['indicators'].get('fibonacci_levels', [0.0, 0.0, 0.0, 0.0, 0.0])
+    async def generate_natural_response(self, user_message, context_info, symbol=None):
+        logger.info(f"Generating natural response for message: {user_message}")
+        prompt = (
+            f"Türkçe, ultra samimi ve esprili bir şekilde yanıt ver. Kullanıcıya 'kanka' diye hitap et, hafif argo kullan ama abartma. 😎 "
+            f"KALIN YAZI İÇİN ** KULLANMA, bunun yerine düz metin veya emoji kullan. 🚫 "
+            f"Mesajına uygun, akıcı ve doğal bir muhabbet kur. Eğer sembol ({symbol}) varsa, bağlama uygun şekilde atıfta bulun. 🤝 "
+            f"Konuşma geçmişini ve son analizi dikkate al. Emoji kullan, özgürce yaz! 🎉 Yanıt maks 1500 karakter olsun. Karakter sayısını yazma. 🚫\n\n"
+            f"Kullanıcı mesajı: {user_message}\n"
+            f"Bağlam: {context_info}\n"
+        )
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response_text = ""
+                stream = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": "Sen kanka gibi konuşan, samimi bir trading botusun. Türkçe, esprili ve doğal cevaplar ver. Yanıt sonunda karakter sayısını yazma."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=1000,
+                    stream=True
+                )
+                async for chunk in stream:
+                    if chunk.choices[0].delta.content:
+                        response_text += chunk.choices[0].delta.content
+                logger.info(f"Grok response for {user_message}: {response_text}")
+                return response_text
+            except RateLimitError as e:
+                if attempt == max_retries - 1:
+                    logger.error(f"Grok 4 natural response error after {max_retries} retries: {e} 😞")
+                    return "Kanka, API limitine takıldık. Bi’ süre sonra tekrar deneyelim mi? 😅"
+                wait_time = (2 ** attempt) + random.uniform(0, 0.1)
+                logger.info(f"Rate limit hit, retrying in {wait_time:.2f} seconds")
+                await asyncio.sleep(wait_time)
+            except asyncio.TimeoutError:
+                logger.error(f"Grok 4 API timeout for natural response 😢")
+                return "Kanka, internet nazlandı, bi’ daha sor bakalım! 😜"
+            except Exception as e:
+                logger.error(f"Grok 4 natural response error: {e} 😞")
+                return "Kanka, neyi kastediyosun, bi’ açar mısın? Hadi, muhabbet edelim! 😄"
+        finally:
+            gc.collect()
 
-        raw_data = {}
-        for interval in TIMEFRAMES:
-            raw_data[interval] = data['indicators'].get(f'raw_data_{interval}', {'high': 0.0, 'low': 0.0, 'close': 0.0})
+    async def analyze_coin(self, symbol, chat_id):
+        logger.info(f"Analyzing coin {symbol} for chat_id: {chat_id}")
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                market_data = await self.kucoin.fetch_market_data(symbol)
+                if not market_data:
+                    return f"Kanka, {symbol} için veri çekemedim. Başka bi’ coin mi bakalım? 😕"
 
+                prompt = self._create_analysis_prompt(market_data, symbol)
+                response_text = ""
+                stream = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": "Sen bir kripto analiz botusun. Teknik analiz yap, samimi ve esprili bir dille Türkçe cevap ver. Grafik verilerini kullanıcıya anlat, trendleri belirt, alım-satım önerisi verme ama olasılıkları tartış. Analiz sonunda karakter sayısını yazma."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.7,
+                    max_tokens=1000,
+                    stream=True
+                )
+                async for chunk in stream:
+                    if chunk.choices[0].delta.content:
+                        response_text += chunk.choices[0].delta.content
+                logger.info(f"Grok analysis for {symbol}: {response_text}")
+                return response_text
+            except RateLimitError as e:
+                if attempt == max_retries - 1:
+                    logger.error(f"Grok 4 coin analysis error after {max_retries} retries: {e} 😞")
+                    return f"Kanka, {symbol} analizi yaparken API limitine takıldık. Bi’ süre sonra tekrar deneyelim mi? 😅"
+                wait_time = (2 ** attempt) + random.uniform(0, 0.1)
+                logger.info(f"Rate limit hit, retrying in {wait_time:.2f} seconds")
+                await asyncio.sleep(wait_time)
+            except Exception as e:
+                logger.error(f"Grok 4 coin analysis error: {e} 😞")
+                return f"Kanka, {symbol} analizi yaparken bi’ şeyler ters gitti. Tekrar deneyelim mi? 😅"
+            finally:
+                gc.collect()
+
+    def _create_analysis_prompt(self, market_data, symbol):
+        indicators = calculate_indicators(market_data['klines'], market_data['order_book'], symbol)
+        fib_levels = indicators.get('fibonacci_levels', [0.0, 0.0, 0.0, 0.0, 0.0])
+        
         indicators_formatted = []
         for interval in TIMEFRAMES:
-            ma50 = data['indicators'][f'ma_{interval}']['ma50']
-            rsi = data['indicators'][f'rsi_{interval}']
-            atr = data['indicators'][f'atr_{interval}']
-            macd = data['indicators'][f'macd_{interval}']['macd']
-            signal = data['indicators'][f'macd_{interval}']['signal']
-            bb_upper = data['indicators'][f'bbands_{interval}']['upper']
-            bb_lower = data['indicators'][f'bbands_{interval}']['lower']
-            stoch_k = data['indicators'][f'stoch_{interval}']['k']
-            stoch_d = data['indicators'][f'stoch_{interval}']['d']
-            obv = data['indicators'][f'obv_{interval}']
+            ma50 = indicators.get(f'ma_{interval}', {}).get('ma50', 0.0)
+            rsi = indicators.get(f'rsi_{interval}', 50.0)
+            atr = indicators.get(f'atr_{interval}', 0.0)
+            macd = indicators.get(f'macd_{interval}', {}).get('macd', 0.0)
+            signal = indicators.get(f'macd_{interval}', {}).get('signal', 0.0)
+            bb_upper = indicators.get(f'bbands_{interval}', {}).get('upper', 0.0)
+            bb_lower = indicators.get(f'bbands_{interval}', {}).get('lower', 0.0)
+            stoch_k = indicators.get(f'stoch_{interval}', {}).get('k', 0.0)
+            stoch_d = indicators.get(f'stoch_{interval}', {}).get('d', 0.0)
+            obv = indicators.get(f'obv_{interval}', 0.0)
             indicators_formatted.append(
                 f"⏰ {interval} Göstergeleri:\n"
                 f"  📈 MA50: {ma50:.2f}\n"
@@ -275,11 +364,9 @@ class GrokClient:
             )
 
         raw_data_formatted = []
-        for interval in raw_data:
-            high = raw_data[interval]['high']
-            low = raw_data[interval]['low']
-            close = raw_data[interval]['close']
-            raw_data_formatted.append(f"{interval}: High=${high:.2f}, Low=${low:.2f}, Close=${close:.2f}")
+        for interval in TIMEFRAMES:
+            raw_data = indicators.get(f'raw_data_{interval}', {'high': 0.0, 'low': 0.0, 'close': 0.0})
+            raw_data_formatted.append(f"{interval}: High=${raw_data['high']:.2f}, Low=${raw_data['low']:.2f}, Close=${raw_data['close']:.2f}")
 
         prompt = (
             f"{symbol} için vadeli işlem analizi yap (spot piyasa verilerine dayalı). Yanıt tamamen Türkçe, detaylı ama kısa (maks 3000 karakter) olmalı. 😎 "
@@ -287,7 +374,7 @@ class GrokClient:
             f"Sadece tek bir long ve short pozisyon önerisi sun (giriş fiyatı, take-profit, stop-loss, kaldıraç, risk/ödül oranı ve trend tahmini). "
             f"Değerler tamamen senin analizine dayansın, kodda hesaplama yapılmasın. 🧠 "
             f"Toplu değerlendirme (yorum) detaylı, emoji dolu ve samimi olsun, ama özlü yaz (maks 1500 karakter). 🎉 "
-            f"ATR > %5 veya BTC/ETH korelasyonu > 0.8 ise yatırımdan uzak dur uyarısı ekle, ancak teorik pozisyon parametrelerini sağla. ⚠️ "
+            f"ATR > %5 ise yatırımdan uzak dur uyarısı ekle, ancak teorik pozisyon parametrelerini sağla. ⚠️ "
             f"Spot verilerini vadeli işlem için uyarla. Doğal, profesyonel ama samimi bir üslup kullan. 😄 "
             f"Giriş, take-profit ve stop-loss’u nasıl belirlediğini, hangi göstergelere (MA50, RSI, MACD, Bollinger, Stochastic, OBV) dayandığını kısaca açıkla. "
             f"Tüm veriler KuCoin’den alındı. Uzun vadeli veri eksikse, kısa vadeli verilere odaklan ve belirt. 📊\n\n"
@@ -301,13 +388,11 @@ class GrokClient:
             f"### Ham Veriler\n"
             f"{', '.join(raw_data_formatted)}\n\n"
             f"### Diğer Veriler\n"
-            f"- Mevcut Fiyat: {data['price']:.2f} USDT 💰\n"
-            f"- 24 Saatlik Değişim: {data.get('price_change_24hr', 0.0):.2f}% 📈\n"
+            f"- Mevcut Fiyat: {market_data['price']:.2f} USDT 💰\n"
+            f"- 24 Saatlik Değişim: {market_data.get('price_change_24hr', 0.0):.2f}% 📈\n"
             f"- Göstergeler:\n"
             f"{''.join(indicators_formatted)}\n"
             f"- Fibonacci Seviyeleri: {', '.join([f'${x:.2f}' for x in fib_levels])} 📏\n"
-            f"- BTC Korelasyonu: {data['indicators']['btc_correlation']:.2f} 🤝\n"
-            f"- ETH Korelasyonu: {data['indicators']['eth_correlation']:.2f} 🤝\n\n"
             f"Çıktı formatı:\n"
             f"{symbol} Vadeli Analiz ({datetime.now().strftime('%Y-%m-%d %H:%M')}) ⏰\n"
             f"Zaman Dilimleri: {', '.join(TIMEFRAMES)} 🕒\n"
@@ -328,74 +413,10 @@ class GrokClient:
             f"Destek: [Hesaplanan seviyeler] 🛡️\n"
             f"Direnç: [Hesaplanan seviyeler] 🏰\n"
             f"Fibonacci: {', '.join([f'${x:.2f}' for x in fib_levels])} 📏\n"
-            f"Volatilite: {data['indicators']['atr_5m']:.2f}% ({'Yüksek, uzak dur! 😱' if data['indicators']['atr_5m'] > 5 else 'Normal 😎'}) ⚡\n"
-            f"BTC Korelasyonu: {data['indicators']['btc_correlation']:.2f} ({'Yüksek, dikkat! ⚠️' if data['indicators']['btc_correlation'] > 0.8 else 'Normal 😎'}) 🤝\n"
-            f"ETH Korelasyonu: {data['indicators']['eth_correlation']:.2f} ({'Yüksek, dikkat! ⚠️' if data['indicators']['eth_correlation'] > 0.8 else 'Normal 😎'}) 🤝\n"
-            f"Yorum: [Kısa, öz ama detaylı açıkla, hangi göstergelere dayandığını, giriş/take-profit/stop-loss seçim gerekçesini, yüksek korelasyon veya volatilite varsa neden yatırımdan uzak durulmalı belirt, emoji kullan, samimi ol! 🎉 Maks 1500 karakter. KALIN YAZI İÇİN ** KULLANMA! 🚫]\n"
+            f"Volatilite: {indicators.get('atr_1h', 0.0):.2f}% ({'Yüksek, uzak dur! 😱' if indicators.get('atr_1h', 0.0) > 5 else 'Normal 😎'}) ⚡\n"
+            f"Yorum: [Kısa, öz ama detaylı açıkla, hangi göstergelere dayandığını, giriş/take-profit/stop-loss seçim gerekçesini, yüksek volatilite varsa neden yatırımdan uzak durulmalı belirt, emoji kullan, samimi ol! 🎉 Maks 1500 karakter. Karakter sayısını yazma. 🚫]\n"
         )
-
-        try:
-            # Stream modunu desteklemek için
-            analysis_text = ""
-            stream = await self.client.chat.completions.create(
-                model="grok-4",
-                messages=[
-                    {"role": "system", "content": "You are Grok, a highly intelligent, helpful AI assistant created by xAI."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=3000,
-                stream=True
-            )
-            async for chunk in stream:
-                if chunk.choices[0].delta.content:
-                    analysis_text += chunk.choices[0].delta.content
-
-            logger.info(f"Grok 4 raw response for {symbol}: {analysis_text} 📜")
-            required_fields = ['Long Pozisyon', 'Short Pozisyon', 'Destek', 'Direnç', 'Yorum']
-            missing_fields = []
-            for field in required_fields:
-                if field == 'Yorum':
-                    if not analysis_text.strip() or 'Yorum:' not in analysis_text:
-                        missing_fields.append(field)
-                elif field not in analysis_text:
-                    missing_fields.append(field)
-            if missing_fields:
-                raise ValueError(f"Grok 4 yanıtı eksik: {', '.join(missing_fields)} 😞")
-            return {'analysis_text': analysis_text}
-        except (asyncio.TimeoutError, ValueError, Exception) as e:
-            logger.error(f"Grok 4 API error for {symbol}: {e} 😢")
-            raise Exception(f"Grok 4 API'den veri alınamadı: {str(e)} 😞")
-
-    async def generate_natural_response(self, user_message, context_info, symbol=None):
-        prompt = (
-            f"Türkçe, ultra samimi ve esprili bir şekilde yanıt ver. Kullanıcıya 'kanka' diye hitap et, hafif argo kullan ama abartma. 😎 "
-            f"KALIN YAZI İÇİN ** KULLANMA, bunun yerine düz metin veya emoji kullan. 🚫 "
-            f"Mesajına uygun, akıcı ve doğal bir muhabbet kur. Eğer sembol ({symbol}) varsa, bağlama uygun şekilde atıfta bulun ve BTC/ETH korelasyonlarını vurgula. 🤝 "
-            f"Konuşma geçmişini ve son analizi dikkate al. Emoji kullan, özgürce yaz! 🎉 Yanıt maks 1500 karakter olsun.\n\n"
-            f"Kullanıcı mesajı: {user_message}\n"
-            f"Bağlam: {context_info}\n"
-        )
-        try:
-            response_text = ""
-            stream = await self.client.chat.completions.create(
-                model="grok-4",
-                messages=[
-                    {"role": "system", "content": "You are Grok, a highly intelligent, helpful AI assistant created by xAI."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=1000,
-                stream=True
-            )
-            async for chunk in stream:
-                if chunk.choices[0].delta.content:
-                    response_text += chunk.choices[0].delta.content
-            return response_text
-        except asyncio.TimeoutError:
-            logger.error(f"Grok 4 API timeout for natural response 😢")
-            return "Kanka, internet nazlandı, bi’ daha sor bakalım! 😜"
-        except Exception as e:
-            logger.error(f"Grok 4 natural response error: {e} 😞")
-            return "Kanka, neyi kastediyosun, bi’ açar mısın? Hadi, muhabbet edelim! 😄"
+        return prompt
 
 class Storage:
     def __init__(self):
@@ -438,6 +459,8 @@ class Storage:
         except psycopg2.Error as e:
             logger.error(f"PostgreSQL tablo oluşturma hatası: {e} 😞")
             self.conn.rollback()
+        finally:
+            gc.collect()
 
     def save_analysis(self, symbol, data):
         """Analizleri PostgreSQL’e kaydet."""
@@ -450,13 +473,15 @@ class Storage:
                     symbol,
                     datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                     json.dumps(data['indicators']),
-                    data['grok_analysis']['analysis_text']
+                    data['grok_analysis']
                 ))
                 self.conn.commit()
                 logger.info(f"{symbol} için analiz kaydedildi. 💾")
         except psycopg2.Error as e:
             logger.error(f"PostgreSQL analiz kaydetme hatası: {e} 😞")
             self.conn.rollback()
+        finally:
+            gc.collect()
 
     def save_conversation(self, chat_id, user_message, bot_response, symbol=None):
         """Konuşmaları PostgreSQL’e kaydet."""
@@ -472,21 +497,13 @@ class Storage:
                     datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                     symbol
                 ))
-                # Son 100 konuşmayı sakla
-                cur.execute("""
-                    DELETE FROM conversations
-                    WHERE id NOT IN (
-                        SELECT id FROM conversations
-                        WHERE chat_id = %s
-                        ORDER BY timestamp DESC
-                        LIMIT 100
-                    ) AND chat_id = %s
-                """, (chat_id, chat_id))
                 self.conn.commit()
                 logger.info(f"Konuşma kaydedildi (chat_id: {chat_id}). 💬")
         except psycopg2.Error as e:
             logger.error(f"PostgreSQL konuşma kaydetme hatası: {e} 😞")
             self.conn.rollback()
+        finally:
+            gc.collect()
 
     def get_previous_analysis(self, symbol):
         """Önceki analizi getir."""
@@ -505,6 +522,8 @@ class Storage:
         except psycopg2.Error as e:
             logger.error(f"PostgreSQL analiz alma hatası: {e} 😞")
             return None
+        finally:
+            gc.collect()
 
     def get_latest_analysis(self, symbol):
         """Son analizi getir."""
@@ -519,6 +538,8 @@ class Storage:
         except psycopg2.Error as e:
             logger.error(f"PostgreSQL son analiz alma hatası: {e} 😞")
             return None
+        finally:
+            gc.collect()
 
     def get_conversation_history(self, chat_id, limit=100):
         """Konuşma geçmişini getir."""
@@ -537,6 +558,8 @@ class Storage:
         except psycopg2.Error as e:
             logger.error(f"PostgreSQL konuşma geçmişi alma hatası: {e} 😞")
             return []
+        finally:
+            gc.collect()
 
     def get_last_symbol(self, chat_id):
         """Son kullanılan sembolü getir."""
@@ -554,18 +577,64 @@ class Storage:
         except psycopg2.Error as e:
             logger.error(f"PostgreSQL son sembol alma hatası: {e} 😞")
             return None
+        finally:
+            gc.collect()
 
-    def clean_old_data(self, days=7):
-        """Eski verileri temizle."""
+    async def clear_7days(self, chat_id):
+        """7 günden eski verileri sil."""
+        if chat_id != AUTHORIZED_USER_ID:
+            return "Kanka, bu komutu sadece patron kullanabilir! 😎"
         try:
             with self.conn.cursor() as cur:
-                cutoff = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+                cutoff = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d %H:%M:%S')
                 cur.execute("DELETE FROM analyses WHERE timestamp < %s", (cutoff,))
+                cur.execute("DELETE FROM conversations WHERE timestamp < %s", (cutoff,))
                 self.conn.commit()
-                logger.info("Eski analiz verileri temizlendi. 🧹")
+                logger.info("7 günden eski veriler temizlendi. 🧹")
+                return "Kanka, 7 günden eski veriler silindi, yer açtık! 🚀"
         except psycopg2.Error as e:
-            logger.error(f"PostgreSQL veri temizleme hatası: {e} 😞")
+            logger.error(f"PostgreSQL 7 günlük veri temizleme hatası: {e} 😞")
             self.conn.rollback()
+            return "Kanka, bi’ şeyler ters gitti, veriler silinemedi. 😅 Tekrar deneyelim mi?"
+        finally:
+            gc.collect()
+
+    async def clear_3days(self, chat_id):
+        """3 günden eski verileri sil."""
+        if chat_id != AUTHORIZED_USER_ID:
+            return "Kanka, bu komutu sadece patron kullanabilir! 😎"
+        try:
+            with self.conn.cursor() as cur:
+                cutoff = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d %H:%M:%S')
+                cur.execute("DELETE FROM analyses WHERE timestamp < %s", (cutoff,))
+                cur.execute("DELETE FROM conversations WHERE timestamp < %s", (cutoff,))
+                self.conn.commit()
+                logger.info("3 günden eski veriler temizlendi. 🧹")
+                return "Kanka, 3 günden eski veriler silindi, tertemiz oldu! 🚀"
+        except psycopg2.Error as e:
+            logger.error(f"PostgreSQL 3 günlük veri temizleme hatası: {e} 😞")
+            self.conn.rollback()
+            return "Kanka, bi’ şeyler ters gitti, veriler silinemedi. 😅 Tekrar deneyelim mi?"
+        finally:
+            gc.collect()
+
+    async def clear_all(self, chat_id):
+        """Tüm veritabanını sıfırla."""
+        if chat_id != AUTHORIZED_USER_ID:
+            return "Kanka, bu komutu sadece patron kullanabilir! 😎"
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("DELETE FROM analyses")
+                cur.execute("DELETE FROM conversations")
+                self.conn.commit()
+                logger.info("Tüm veritabanı sıfırlandı. 🧹")
+                return "Kanka, veritabanı komple sıfırlandı, sıfırdan başlıyoruz! 🚀"
+        except psycopg2.Error as e:
+            logger.error(f"PostgreSQL tüm veri sıfırlama hatası: {e} 😞")
+            self.conn.rollback()
+            return "Kanka, bi’ şeyler ters gitti, veritabanı sıfırlanamadı. 😅 Tekrar deneyelim mi?"
+        finally:
+            gc.collect()
 
     def __del__(self):
         """Bağlantıyı kapat."""
@@ -575,8 +644,10 @@ class Storage:
                 logger.info("PostgreSQL bağlantısı kapatıldı. 🛑")
         except psycopg2.Error as e:
             logger.error(f"PostgreSQL bağlantı kapatma hatası: {e} 😞")
+        finally:
+            gc.collect()
 
-def calculate_indicators(kline_data, order_book, btc_data, eth_data, symbol):
+def calculate_indicators(kline_data, order_book, symbol):
     indicators = {}
     
     def safe_ema(series, period):
@@ -734,16 +805,17 @@ def calculate_indicators(kline_data, order_book, btc_data, eth_data, symbol):
                 f'raw_data_{interval}': {'high': 0.0, 'low': 0.0, 'close': 0.0}
             })
 
+    # Fibonacci seviyeleri
     for interval in TIMEFRAMES:
         kline = kline_data.get(interval, {}).get('data', [])
-        if kline and len(kline) >= 30:
+        if kline and len(kline) >= 10:
             df = pd.DataFrame(kline, columns=['timestamp', 'open', 'close', 'high', 'low', 'volume', 'close_time', 'quote_volume'])
             df[['high', 'low']] = df[['high', 'low']].astype(float)
             df = df.dropna()
             if not df.empty:
                 try:
-                    high = df['high'].tail(30).max()
-                    low = df['low'].tail(30).min()
+                    high = df['high'].tail(10).max()
+                    low = df['low'].tail(10).min()
                     if pd.notnull(high) and pd.notnull(low) and high >= low:
                         diff = high - low
                         indicators['fibonacci_levels'] = [
@@ -761,7 +833,7 @@ def calculate_indicators(kline_data, order_book, btc_data, eth_data, symbol):
                     indicators['fibonacci_levels'] = [0.0, 0.0, 0.0, 0.0, 0.0]
                 break
         else:
-            logger.warning(f"{symbol} için Fibonacci için yetersiz veri ({len(kline)} < 30) 😕")
+            logger.warning(f"{symbol} için Fibonacci için yetersiz veri ({len(kline)} < 10) 😕")
             indicators['fibonacci_levels'] = [0.0, 0.0, 0.0, 0.0, 0.0]
 
     if order_book.get('bids') and order_book.get('asks'):
@@ -777,54 +849,6 @@ def calculate_indicators(kline_data, order_book, btc_data, eth_data, symbol):
         indicators['bid_ask_ratio'] = 0.0
         logger.warning(f"{symbol} için sipariş defterinde bid veya ask verisi yok 😕")
 
-    if btc_data.get('data') and len(btc_data['data']) > 1:
-        try:
-            btc_df = pd.DataFrame(btc_data['data'], columns=['timestamp', 'open', 'close', 'high', 'low', 'volume', 'close_time', 'quote_volume'])
-            btc_df['close'] = btc_df['close'].astype(float)
-            btc_df = btc_df.dropna()
-            if kline_data.get('5m', {}).get('data') and len(kline_data['5m']['data']) > 1:
-                coin_df = pd.DataFrame(kline_data['5m']['data'], columns=['timestamp', 'open', 'close', 'high', 'low', 'volume', 'close_time', 'quote_volume'])
-                coin_df['close'] = coin_df['close'].astype(float)
-                coin_df = coin_df.dropna()
-                if len(coin_df) == len(btc_df):
-                    correlation = coin_df['close'].corr(btc_df['close'])
-                    indicators['btc_correlation'] = float(correlation) if not np.isnan(correlation) else 0.0
-                    logger.info(f"{symbol} için BTC korelasyonu hesaplandı: {indicators['btc_correlation']} 🤝")
-                else:
-                    logger.warning(f"{symbol} için BTC korelasyonu: Veri uzunlukları uyuşmuyor ({len(coin_df)} vs {len(btc_df)}) 😕")
-                    indicators['btc_correlation'] = 0.0
-            else:
-                indicators['btc_correlation'] = 0.0
-        except Exception as e:
-            logger.error(f"{symbol} için BTC korelasyon hatası: {e} 😞")
-            indicators['btc_correlation'] = 0.0
-    else:
-        indicators['btc_correlation'] = 0.0
-
-    if eth_data.get('data') and len(eth_data['data']) > 1:
-        try:
-            eth_df = pd.DataFrame(eth_data['data'], columns=['timestamp', 'open', 'close', 'high', 'low', 'volume', 'close_time', 'quote_volume'])
-            eth_df['close'] = eth_df['close'].astype(float)
-            eth_df = eth_df.dropna()
-            if kline_data.get('5m', {}).get('data') and len(kline_data['5m']['data']) > 1:
-                coin_df = pd.DataFrame(kline_data['5m']['data'], columns=['timestamp', 'open', 'close', 'high', 'low', 'volume', 'close_time', 'quote_volume'])
-                coin_df['close'] = coin_df['close'].astype(float)
-                coin_df = coin_df.dropna()
-                if len(coin_df) == len(eth_df):
-                    correlation = coin_df['close'].corr(eth_df['close'])
-                    indicators['eth_correlation'] = float(correlation) if not np.isnan(correlation) else 0.0
-                    logger.info(f"{symbol} için ETH korelasyonu hesaplandı: {indicators['eth_correlation']} 🤝")
-                else:
-                    logger.warning(f"{symbol} için ETH korelasyonu: Veri uzunlukları uyuşmuyor ({len(coin_df)} vs {len(eth_df)}) 😕")
-                    indicators['eth_correlation'] = 0.0
-            else:
-                indicators['eth_correlation'] = 0.0
-        except Exception as e:
-            logger.error(f"{symbol} için ETH korelasyon hatası: {e} 😞")
-            indicators['eth_correlation'] = 0.0
-    else:
-        indicators['eth_correlation'] = 0.0
-
     return indicators
 
 class TelegramBot:
@@ -836,6 +860,9 @@ class TelegramBot:
         bot_token = os.getenv('TELEGRAM_TOKEN')
         self.app = Application.builder().token(bot_token).build()
         self.app.add_handler(CommandHandler("start", self.start))
+        self.app.add_handler(CommandHandler("clear_7days", self.clear_7days))
+        self.app.add_handler(CommandHandler("clear_3days", self.clear_3days))
+        self.app.add_handler(CommandHandler("clear_all", self.clear_all))
         self.app.add_handler(CallbackQueryHandler(self.button))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text_message))
         self.active_analyses = {}
@@ -850,9 +877,25 @@ class TelegramBot:
         ]
         response = (
             "Kanka, hadi bakalım! Coin analizi mi yapalım, yoksa başka muhabbet mi çevirelim? 😎\n"
-            "Örnek: 'ADA analiz', 'nasılsın', 'geçmiş', 'BTC korelasyonu'.\n"
+            "Örnek: 'ADA analiz', 'nasılsın', 'geçmiş'.\n"
+            "Veritabanı temizleme için: /clear_7days, /clear_3days, /clear_all (sadece sen kullanabilirsin!).\n"
         )
         await update.message.reply_text(response, reply_markup=InlineKeyboardMarkup(keyboard))
+        self.storage.save_conversation(update.effective_chat.id, update.message.text, response)
+
+    async def clear_7days(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        response = await self.storage.clear_7days(update.effective_chat.id)
+        await update.message.reply_text(response)
+        self.storage.save_conversation(update.effective_chat.id, update.message.text, response)
+
+    async def clear_3days(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        response = await self.storage.clear_3days(update.effective_chat.id)
+        await update.message.reply_text(response)
+        self.storage.save_conversation(update.effective_chat.id, update.message.text, response)
+
+    async def clear_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        response = await self.storage.clear_all(update.effective_chat.id)
+        await update.message.reply_text(response)
         self.storage.save_conversation(update.effective_chat.id, update.message.text, response)
 
     async def button(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -885,6 +928,7 @@ class TelegramBot:
         finally:
             async with self.analysis_lock:
                 del self.active_analyses[analysis_key]
+            gc.collect()
 
     async def handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text.lower()
@@ -920,7 +964,7 @@ class TelegramBot:
             if symbol:
                 logger.info(f"Using last symbol {symbol} from conversation history 📜")
 
-        keywords = ['analiz', 'trend', 'long', 'short', 'destek', 'direnç', 'yorum', 'neden', 'korelasyon']
+        keywords = ['analiz', 'trend', 'long', 'short', 'destek', 'direnç', 'yorum', 'neden']
         matched_keyword = next((k for k in keywords if k in text), None)
 
         context_info += f"\nSon {symbol} analizi: {self.storage.get_latest_analysis(symbol) or 'Yok' if symbol else 'Yok'}"
@@ -951,27 +995,13 @@ class TelegramBot:
                     del self.active_analyses[analysis_key]
             return
 
-        if matched_keyword == 'korelasyon' and symbol:
-            current_analysis = self.storage.get_latest_analysis(symbol)
-            response = await self.grok.generate_natural_response(text, context_info, symbol)
-            if current_analysis:
-                btc_corr = re.search(r'BTC Korelasyonu: (.*?)(?:\n|$)', current_analysis, re.DOTALL)
-                eth_corr = re.search(r'ETH Korelasyonu: (.*?)(?:\n|$)', current_analysis, re.DOTALL)
-                response += f"\nBTC Korelasyon: {btc_corr.group(1) if btc_corr else 'Bilinmiyor'} 🤝"
-                response += f"\nETH Korelasyon: {eth_corr.group(1) if eth_corr else 'Bilinmiyor'} 🤝"
-            else:
-                response += f"\nKanka, {symbol} için analiz yok. Hemen yapayım mı? (örn: {symbol} analiz) 😄"
-            await update.message.reply_text(response)
-            self.storage.save_conversation(chat_id, text, response, symbol)
-            return
-
-        if symbol and matched_keyword:
+        if matched_keyword and symbol:
             current_analysis = self.storage.get_latest_analysis(symbol)
             response = await self.grok.generate_natural_response(text, context_info, symbol)
             if current_analysis:
                 if matched_keyword == 'trend':
-                    long_trend = re.search(r'Trend: (.*?)(?:\n|$)', current_analysis, re.DOTALL)
-                    response += f"\nTrend: {long_trend.group(1) if long_trend else 'Bilinmiyor'} 🚀📉"
+                    trend_match = re.search(r'Trend: (.*?)(?:\n|$)', current_analysis, re.DOTALL)
+                    response += f"\nTrend: {trend_match.group(1) if trend_match else 'Bilinmiyor'} 🚀📉"
                 elif matched_keyword == 'long':
                     long_match = re.search(r'Long Pozisyon:(.*?)(?:Short|$)', current_analysis, re.DOTALL)
                     response += f"\nLong: {long_match.group(1).strip() if long_match else 'Bilinmiyor'} 📈"
@@ -1031,9 +1061,9 @@ class TelegramBot:
                 await self.app.bot.send_message(chat_id=chat_id, text=response)
                 self.storage.save_conversation(chat_id, symbol, response, symbol)
                 return
-            data['indicators'] = calculate_indicators(data['klines'], data['order_book'], data['btc_data'], data['eth_data'], symbol)
-            data['grok_analysis'] = await self.grok.analyze_coin(symbol, data)
-            message = data['grok_analysis']['analysis_text']
+            data['indicators'] = calculate_indicators(data['klines'], data['order_book'], symbol)
+            data['grok_analysis'] = await self.grok.analyze_coin(symbol, chat_id)
+            message = data['grok_analysis']
             await self.split_and_send_message(chat_id, message, symbol)
             self.storage.save_analysis(symbol, data)
             return data
@@ -1044,8 +1074,6 @@ class TelegramBot:
             self.storage.save_conversation(chat_id, symbol, response, symbol)
             return
         finally:
-            data = None
-            import gc
             gc.collect()
 
     async def fetch_market_data(self, symbol):
@@ -1054,22 +1082,16 @@ class TelegramBot:
             klines = {}
             for interval in TIMEFRAMES:
                 klines[interval] = await self.kucoin.fetch_kline_data(symbol, interval)
-                await asyncio.sleep(0.5)
-
+                await asyncio.sleep(1)
             order_book = await self.kucoin.fetch_order_book(symbol)
             ticker = await self.kucoin.fetch_ticker(symbol)
             ticker_24hr = await self.kucoin.fetch_24hr_ticker(symbol)
-            btc_data = await self.kucoin.fetch_kline_data('BTCUSDT', '5m')
-            eth_data = await self.kucoin.fetch_kline_data('ETHUSDT', '5m')
-
             return {
                 'klines': klines,
                 'order_book': order_book,
                 'price': float(ticker.get('price', 0.0)),
                 'funding_rate': 0.0,
-                'price_change_24hr': float(ticker_24hr.get('priceChangePercent', 0.0)),
-                'btc_data': btc_data,
-                'eth_data': eth_data
+                'price_change_24hr': float(ticker_24hr.get('priceChangePercent', 0.0))
             }
         except Exception as e:
             logger.error(f"Error fetching market data for {symbol}: {e} 😞")
