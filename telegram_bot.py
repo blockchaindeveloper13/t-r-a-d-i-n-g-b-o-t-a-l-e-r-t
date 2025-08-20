@@ -44,10 +44,10 @@ COINS = {
     "MKRUSDT": ["mkr", "mkrusdt", "maker"]
 }
 
-# Seçilen zaman dilimi (bellek optimizasyonu için tek zaman dilimi)
+# Seçilen zaman dilimi
 TIMEFRAMES = ['1h']
 
-# Yetkili kullanıcı (senin chat_id)
+# Yetkili kullanıcı
 AUTHORIZED_USER_ID = 1616739367
 
 def validate_data(df):
@@ -128,7 +128,7 @@ class KuCoinClient:
             logger.error(f"Error fetching KuCoin kline data for {symbol} ({interval}): {e} 😞")
             return {'data': []}
         finally:
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.1)
             gc.collect()
 
     async def fetch_order_book(self, symbol):
@@ -158,7 +158,7 @@ class KuCoinClient:
             logger.error(f"Error fetching KuCoin order book for {symbol}: {e} 😞")
             return {'bids': [], 'asks': [], 'timestamp': 0}
         finally:
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.1)
             gc.collect()
 
     async def fetch_ticker(self, symbol):
@@ -184,7 +184,7 @@ class KuCoinClient:
             logger.error(f"Error fetching KuCoin ticker for {symbol}: {e} 😞")
             return {'symbol': symbol, 'price': '0.0'}
         finally:
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.1)
             gc.collect()
 
     async def fetch_24hr_ticker(self, symbol):
@@ -221,7 +221,7 @@ class KuCoinClient:
             logger.error(f"Error fetching KuCoin 24hr ticker for {symbol}: {e} 😞")
             return {'priceChangePercent': '0.0'}
         finally:
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.1)
             gc.collect()
 
     async def validate_symbol(self, symbol):
@@ -237,7 +237,7 @@ class KuCoinClient:
             logger.error(f"Error validating symbol {symbol}: {e} 😞")
             return False
         finally:
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.1)
             gc.collect()
 
     async def close(self):
@@ -249,9 +249,10 @@ class KuCoinClient:
 
 class GrokClient:
     """Grok 4 API ile analiz yapar ve doğal dil işleme sağlar. 🧠✨"""
-    def __init__(self):
+    def __init__(self, kucoin_client):
         self.client = AsyncOpenAI(api_key=os.getenv('GROK_API_KEY'), base_url="https://api.x.ai/v1")
         self.model = "grok-4-0709"
+        self.kucoin = kucoin_client
 
     async def generate_natural_response(self, user_message, context_info, symbol=None):
         logger.info(f"Generating natural response for message: {user_message}")
@@ -294,15 +295,38 @@ class GrokClient:
             except Exception as e:
                 logger.error(f"Grok 4 natural response error: {e} 😞")
                 return "Kanka, neyi kastediyosun, bi’ açar mısın? Hadi, muhabbet edelim! 😄"
+            finally:
+                gc.collect()
+
+    async def fetch_market_data(self, symbol):
+        await self.kucoin.initialize()
+        try:
+            klines = {}
+            for interval in TIMEFRAMES:
+                klines[interval] = await self.kucoin.fetch_kline_data(symbol, interval)
+                await asyncio.sleep(0.1)
+            order_book = await self.kucoin.fetch_order_book(symbol)
+            ticker = await self.kucoin.fetch_ticker(symbol)
+            ticker_24hr = await self.kucoin.fetch_24hr_ticker(symbol)
+            return {
+                'klines': klines,
+                'order_book': order_book,
+                'price': float(ticker.get('price', 0.0)),
+                'funding_rate': 0.0,
+                'price_change_24hr': float(ticker_24hr.get('priceChangePercent', 0.0))
+            }
+        except Exception as e:
+            logger.error(f"Error fetching market data for {symbol}: {e} 😞")
+            return None
         finally:
-            gc.collect()
+            await self.kucoin.close()
 
     async def analyze_coin(self, symbol, chat_id):
         logger.info(f"Analyzing coin {symbol} for chat_id: {chat_id}")
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                market_data = await self.kucoin.fetch_market_data(symbol)
+                market_data = await self.fetch_market_data(symbol)
                 if not market_data:
                     return f"Kanka, {symbol} için veri çekemedim. Başka bi’ coin mi bakalım? 😕"
 
@@ -856,7 +880,7 @@ class TelegramBot:
         self.group_id = int(os.getenv('GROUP_ID', '-1002869335730'))
         self.storage = Storage()
         self.kucoin = KuCoinClient()
-        self.grok = GrokClient()
+        self.grok = GrokClient(self.kucoin)
         bot_token = os.getenv('TELEGRAM_TOKEN')
         self.app = Application.builder().token(bot_token).build()
         self.app.add_handler(CommandHandler("start", self.start))
@@ -927,7 +951,8 @@ class TelegramBot:
                 asyncio.create_task(task)
         finally:
             async with self.analysis_lock:
-                del self.active_analyses[analysis_key]
+                if analysis_key in self.active_analyses:
+                    del self.active_analyses[analysis_key]
             gc.collect()
 
     async def handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -992,7 +1017,8 @@ class TelegramBot:
                     asyncio.create_task(task)
             finally:
                 async with self.analysis_lock:
-                    del self.active_analyses[analysis_key]
+                    if analysis_key in self.active_analyses:
+                        del self.active_analyses[analysis_key]
             return
 
         if matched_keyword and symbol:
@@ -1055,7 +1081,7 @@ class TelegramBot:
 
     async def process_coin(self, symbol, chat_id):
         try:
-            data = await self.fetch_market_data(symbol)
+            data = await self.grok.fetch_market_data(symbol)
             if not data or not any(data.get('klines', {}).get(interval, {}).get('data') for interval in TIMEFRAMES):
                 response = f"Kanka, {symbol} için veri bulamadım. Başka coin mi bakalım? 🤔"
                 await self.app.bot.send_message(chat_id=chat_id, text=response)
@@ -1075,29 +1101,6 @@ class TelegramBot:
             return
         finally:
             gc.collect()
-
-    async def fetch_market_data(self, symbol):
-        await self.kucoin.initialize()
-        try:
-            klines = {}
-            for interval in TIMEFRAMES:
-                klines[interval] = await self.kucoin.fetch_kline_data(symbol, interval)
-                await asyncio.sleep(1)
-            order_book = await self.kucoin.fetch_order_book(symbol)
-            ticker = await self.kucoin.fetch_ticker(symbol)
-            ticker_24hr = await self.kucoin.fetch_24hr_ticker(symbol)
-            return {
-                'klines': klines,
-                'order_book': order_book,
-                'price': float(ticker.get('price', 0.0)),
-                'funding_rate': 0.0,
-                'price_change_24hr': float(ticker_24hr.get('priceChangePercent', 0.0))
-            }
-        except Exception as e:
-            logger.error(f"Error fetching market data for {symbol}: {e} 😞")
-            return None
-        finally:
-            await self.kucoin.close()
 
     async def run(self):
         try:
