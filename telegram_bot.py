@@ -253,7 +253,7 @@ class GrokClient:
         self.client = AsyncOpenAI(
             api_key=os.getenv('GROK_API_KEY'),
             base_url="https://api.x.ai/v1",
-            timeout=30  # 30 saniye timeout
+            timeout=120  # 30 saniye timeout
         )
         self.model = "grok-4-0709"
         self.kucoin = kucoin_client
