@@ -241,7 +241,7 @@ class KuCoinClient:
 class GrokClient:
     """Grok 4 API ile analiz yapar ve doğal dil işleme sağlar. 🧠✨"""
     def __init__(self):
-        self.client = AsyncOpenAI(api_key=os.getenv('GROK_API_KEY'), base_url="https://api.x.ai/v1/chat/completions")
+        self.client = AsyncOpenAI(api_key=os.getenv('GROK_API_KEY'), base_url="https://api.x.ai/v1")
 
     async def analyze_coin(self, symbol, data):
         fib_levels = data['indicators'].get('fibonacci_levels', [0.0, 0.0, 0.0, 0.0, 0.0])
