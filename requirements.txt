@@ -1,0 +1,9 @@
+pandas==2.2.2
+pandas_ta==0.3.14b0
+numpy==1.26.4
+aiohttp==3.10.5
+python-telegram-bot==20.7
+openai==1.42.0
+python-dotenv==1.0.1
+psycopg2-binary==2.9.6
+requests==2.28.0
