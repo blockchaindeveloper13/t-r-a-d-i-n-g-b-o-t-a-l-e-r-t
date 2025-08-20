@@ -449,7 +449,7 @@ class Storage:
                     symbol,
                     datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                     json.dumps(data['indicators']),
-                    data['deepseek_analysis']['analysis_text']
+                    data['grok_analysis']['analysis_text']
                 ))
                 self.conn.commit()
                 logger.info(f"{symbol} için analiz kaydedildi. 💾")
@@ -952,7 +952,7 @@ class TelegramBot:
 
         if matched_keyword == 'korelasyon' and symbol:
             current_analysis = self.storage.get_latest_analysis(symbol)
-            response = await self.deepseek.generate_natural_response(text, context_info, symbol)
+            response = await self.grok.generate_natural_response(text, context_info, symbol)
             if current_analysis:
                 btc_corr = re.search(r'BTC Korelasyonu: (.*?)(?:\n|$)', current_analysis, re.DOTALL)
                 eth_corr = re.search(r'ETH Korelasyonu: (.*?)(?:\n|$)', current_analysis, re.DOTALL)
@@ -966,7 +966,7 @@ class TelegramBot:
 
         if symbol and matched_keyword:
             current_analysis = self.storage.get_latest_analysis(symbol)
-            response = await self.deepseek.generate_natural_response(text, context_info, symbol)
+            response = await self.grok.generate_natural_response(text, context_info, symbol)
             if current_analysis:
                 if matched_keyword == 'trend':
                     long_trend = re.search(r'Trend: (.*?)(?:\n|$)', current_analysis, re.DOTALL)
@@ -992,7 +992,7 @@ class TelegramBot:
             self.storage.save_conversation(chat_id, text, response, symbol)
             return
 
-        response = await self.deepseek.generate_natural_response(text, context_info, symbol)
+        response = await self.grok.generate_natural_response(text, context_info, symbol)
         await update.message.reply_text(response)
         self.storage.save_conversation(chat_id, text, response, symbol)
 
@@ -1004,7 +1004,6 @@ class TelegramBot:
             self.storage.save_conversation(chat_id, symbol, message, symbol)
             return
 
-        # Mesajı mantıklı bölümlere ayır
         sections = []
         current_section = ""
         lines = message.split('\n')
@@ -1017,7 +1016,6 @@ class TelegramBot:
         if current_section:
             sections.append(current_section.strip())
 
-        # Bölümleri sırayla gönder
         for i, section in enumerate(sections, 1):
             part_message = f"{symbol} Analiz - Bölüm {i}/{len(sections)} ⏰\n{section}"
             await self.app.bot.send_message(chat_id=chat_id, text=part_message)
@@ -1033,8 +1031,8 @@ class TelegramBot:
                 self.storage.save_conversation(chat_id, symbol, response, symbol)
                 return
             data['indicators'] = calculate_indicators(data['klines'], data['order_book'], data['btc_data'], data['eth_data'], symbol)
-            data['deepseek_analysis'] = await self.grok.analyze_coin(symbol, data)
-            message = data['deepseek_analysis']['analysis_text']
+            data['grok_analysis'] = await self.grok.analyze_coin(symbol, data)
+            message = data['grok_analysis']['analysis_text']
             await self.split_and_send_message(chat_id, message, symbol)
             self.storage.save_analysis(symbol, data)
             return data
