@@ -339,8 +339,8 @@ class GrokClient:
                      {"role": "user", "content": prompt}
                   ],
                   temperature=0.7,
-                  max_tokens=1500,  # Burayı artırdık
-                  stream=True
+                  max_tokens=4000,  # Burayı artırdık
+                  stream=False
                  )
                 async for chunk in stream:
                     if chunk.choices[0].delta.content:
