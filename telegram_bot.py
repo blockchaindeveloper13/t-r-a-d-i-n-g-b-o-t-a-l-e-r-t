@@ -274,8 +274,8 @@ class GrokClient:
                         {"role": "system", "content": "Sen kanka gibi konuşan, samimi bir trading botusun. Türkçe, esprili ve doğal cevaplar ver. Yanıt sonunda karakter sayısını yazma."},
                         {"role": "user", "content": prompt}
                     ],
-                    max_tokens=3000,
-                    stream=false
+                    max_tokens=4000,
+                    stream=False
                 )
                 async for chunk in stream:
                     if chunk.choices[0].delta.content:
