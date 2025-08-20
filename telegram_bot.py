@@ -333,15 +333,15 @@ class GrokClient:
                 prompt = self._create_analysis_prompt(market_data, symbol)
                 response_text = ""
                 stream = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": "Sen bir kripto analiz botusun. Teknik analiz yap, samimi ve esprili bir dille Türkçe cevap ver. Grafik verilerini kullanıcıya anlat, trendleri belirt, alım-satım önerisi verme ama olasılıkları tartış. Analiz sonunda karakter sayısını yazma."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.7,
-                    max_tokens=1000,
-                    stream=True
-                )
+                  model=self.model,
+                  messages=[
+                     {"role": "system", "content": "Sen bir kripto analiz botusun. Teknik analiz yap, samimi ve esprili bir dille Türkçe cevap ver. Grafik verilerini kullanıcıya anlat, trendleri belirt, alım-satım önerisi verme ama olasılıkları tartış. Analiz sonunda karakter sayısını yazma."},
+                     {"role": "user", "content": prompt}
+                  ],
+                  temperature=0.7,
+                  max_tokens=1500,  # Burayı artırdık
+                  stream=True
+                 )
                 async for chunk in stream:
                     if chunk.choices[0].delta.content:
                         response_text += chunk.choices[0].delta.content
