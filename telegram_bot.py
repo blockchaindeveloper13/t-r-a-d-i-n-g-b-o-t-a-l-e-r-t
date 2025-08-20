@@ -238,10 +238,10 @@ class KuCoinClient:
             self.session = None
             logger.info("KuCoin session kapatıldı. 🛑")
 
-class DeepSeekClient:
-    """DeepSeek API ile analiz yapar ve doğal dil işleme sağlar. 🧠✨"""
+class GrokClient:
+    """Grok 4 API ile analiz yapar ve doğal dil işleme sağlar. 🧠✨"""
     def __init__(self):
-        self.client = AsyncOpenAI(api_key=os.getenv('DEEPSEEK_API_KEY'), base_url="https://api.deepseek.com")
+        self.client = AsyncOpenAI(api_key=os.getenv('GROK_API_KEY'), base_url="https://api.x.ai/v1/chat/completions")
 
     async def analyze_coin(self, symbol, data):
         fib_levels = data['indicators'].get('fibonacci_levels', [0.0, 0.0, 0.0, 0.0, 0.0])
@@ -332,18 +332,24 @@ class DeepSeekClient:
             f"ETH Korelasyonu: {data['indicators']['eth_correlation']:.2f} ({'Yüksek, dikkat! ⚠️' if data['indicators']['eth_correlation'] > 0.8 else 'Normal 😎'}) 🤝\n"
             f"Yorum: [Kısa, öz ama detaylı açıkla, hangi göstergelere dayandığını, giriş/take-profit/stop-loss seçim gerekçesini, yüksek korelasyon veya volatilite varsa neden yatırımdan uzak durulmalı belirt, emoji kullan, samimi ol! 🎉 Maks 1500 karakter. KALIN YAZI İÇİN ** KULLANMA! 🚫]\n"
         )
+
         try:
-            response = await asyncio.wait_for(
-                self.client.chat.completions.create(
-                    model="deepseek-chat",
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=3000,
-                    stream=False
-                ),
-                timeout=180.0
+            # Stream modunu desteklemek için
+            analysis_text = ""
+            stream = await self.client.chat.completions.create(
+                model="grok-4",
+                messages=[
+                    {"role": "system", "content": "You are Grok, a highly intelligent, helpful AI assistant created by xAI."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=3000,
+                stream=True
             )
-            analysis_text = response.choices[0].message.content
-            logger.info(f"DeepSeek raw response for {symbol}: {analysis_text} 📜")
+            async for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    analysis_text += chunk.choices[0].delta.content
+
+            logger.info(f"Grok 4 raw response for {symbol}: {analysis_text} 📜")
             required_fields = ['Long Pozisyon', 'Short Pozisyon', 'Destek', 'Direnç', 'Yorum']
             missing_fields = []
             for field in required_fields:
@@ -353,11 +359,11 @@ class DeepSeekClient:
                 elif field not in analysis_text:
                     missing_fields.append(field)
             if missing_fields:
-                raise ValueError(f"DeepSeek yanıtı eksik: {', '.join(missing_fields)} 😞")
+                raise ValueError(f"Grok 4 yanıtı eksik: {', '.join(missing_fields)} 😞")
             return {'analysis_text': analysis_text}
         except (asyncio.TimeoutError, ValueError, Exception) as e:
-            logger.error(f"DeepSeek API error for {symbol}: {e} 😢")
-            raise Exception(f"DeepSeek API'den veri alınamadı: {str(e)} 😞")
+            logger.error(f"Grok 4 API error for {symbol}: {e} 😢")
+            raise Exception(f"Grok 4 API'den veri alınamadı: {str(e)} 😞")
 
     async def generate_natural_response(self, user_message, context_info, symbol=None):
         prompt = (
@@ -369,21 +375,25 @@ class DeepSeekClient:
             f"Bağlam: {context_info}\n"
         )
         try:
-            response = await asyncio.wait_for(
-                self.client.chat.completions.create(
-                    model="deepseek-chat",
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=1000,
-                    stream=False
-                ),
-                timeout=60.0
+            response_text = ""
+            stream = await self.client.chat.completions.create(
+                model="grok-4",
+                messages=[
+                    {"role": "system", "content": "You are Grok, a highly intelligent, helpful AI assistant created by xAI."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=1000,
+                stream=True
             )
-            return response.choices[0].message.content
+            async for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    response_text += chunk.choices[0].delta.content
+            return response_text
         except asyncio.TimeoutError:
-            logger.error(f"DeepSeek API timeout for natural response 😢")
+            logger.error(f"Grok 4 API timeout for natural response 😢")
             return "Kanka, internet nazlandı, bi’ daha sor bakalım! 😜"
         except Exception as e:
-            logger.error(f"DeepSeek natural response error: {e} 😞")
+            logger.error(f"Grok 4 natural response error: {e} 😞")
             return "Kanka, neyi kastediyosun, bi’ açar mısın? Hadi, muhabbet edelim! 😄"
 
 class Storage:
@@ -821,7 +831,7 @@ class TelegramBot:
         self.group_id = int(os.getenv('GROUP_ID', '-1002869335730'))
         self.storage = Storage()
         self.kucoin = KuCoinClient()
-        self.deepseek = DeepSeekClient()
+        self.grok = GrokClient()
         bot_token = os.getenv('TELEGRAM_TOKEN')
         self.app = Application.builder().token(bot_token).build()
         self.app.add_handler(CommandHandler("start", self.start))
@@ -1023,7 +1033,7 @@ class TelegramBot:
                 self.storage.save_conversation(chat_id, symbol, response, symbol)
                 return
             data['indicators'] = calculate_indicators(data['klines'], data['order_book'], data['btc_data'], data['eth_data'], symbol)
-            data['deepseek_analysis'] = await self.deepseek.analyze_coin(symbol, data)
+            data['deepseek_analysis'] = await self.grok.analyze_coin(symbol, data)
             message = data['deepseek_analysis']['analysis_text']
             await self.split_and_send_message(chat_id, message, symbol)
             self.storage.save_analysis(symbol, data)
