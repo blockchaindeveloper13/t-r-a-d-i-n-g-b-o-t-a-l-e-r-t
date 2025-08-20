@@ -91,46 +91,45 @@ class KuCoinClient:
             self.session = aiohttp.ClientSession()
             logger.info("KuCoin session başlatıldı. 🚀")
 
-    async def fetch_kline_data(self, symbol, interval, count=3):
-        await self.initialize()
-        try:
-            kucoin_intervals = {'1h': '1hour'}
-            if interval not in kucoin_intervals:
-                logger.error(f"Geçersiz aralık {interval} KuCoin için. 😞")
-                return {'data': []}
-            symbol_kucoin = symbol.replace('USDT', '-USDT')
-            url = f"{self.base_url}/api/v1/market/candles?type={kucoin_intervals[interval]}&symbol={symbol_kucoin}"
-            async with self.session.get(url) as response:
-                logger.info(f"Requesting KuCoin URL: {url}")
-                if response.status == 200:
-                    response_data = await response.json()
-                    logger.info(f"Raw KuCoin response: {response_data}")
-                    if response_data['code'] == '200000' and response_data['data']:
-                        data = [
-                            [int(candle[0]) * 1000, float(candle[1]), float(candle[2]), float(candle[3]),
-                             float(candle[4]), float(candle[5]), int(candle[0]) * 1000, float(candle[6])]
-                            for candle in response_data['data']
-                        ][:count]
-                        df = pd.DataFrame(data, columns=['timestamp', 'open', 'close', 'high', 'low', 'volume', 'close_time', 'quote_volume'])
-                        df = validate_data(df)
-                        if df.empty:
-                            logger.warning(f"Geçersiz veya boş veri sonrası DataFrame boş: {symbol} ({interval}) 😕")
-                            return {'data': []}
-                        logger.info(f"KuCoin kline response for {symbol} ({interval}): {df.head().to_dict()}")
-                        return {'data': df.values.tolist()}
-                    else:
-                        logger.warning(f"No KuCoin kline data for {symbol} ({interval}): {response_data}")
-                        return {'data': []}
-                else:
-                    logger.error(f"Failed to fetch KuCoin kline data for {symbol} ({interval}): {response.status} 😢")
-                    return {'data': []}
-        except Exception as e:
-            logger.error(f"Error fetching KuCoin kline data for {symbol} ({interval}): {e} 😞")
+    async def fetch_kline_data(self, symbol, interval, count=50):
+    await self.initialize()
+    try:
+        kucoin_intervals = {'1h': '1hour'}
+        if interval not in kucoin_intervals:
+            logger.error(f"Geçersiz aralık {interval} KuCoin için. 😞")
             return {'data': []}
-        finally:
-            await asyncio.sleep(0.1)
-            gc.collect()
-
+        symbol_kucoin = symbol.replace('USDT', '-USDT')
+        url = f"{self.base_url}/api/v1/market/candles?type={kucoin_intervals[interval]}&symbol={symbol_kucoin}"
+        async with self.session.get(url) as response:
+            logger.info(f"Requesting KuCoin URL: {url}")
+            if response.status == 200:
+                response_data = await response.json()
+                logger.info(f"Raw KuCoin response: {response_data}")
+                if response_data['code'] == '200000' and response_data['data']:
+                    data = [
+                        [int(candle[0]) * 1000, float(candle[1]), float(candle[2]), float(candle[3]),
+                         float(candle[4]), float(candle[5]), int(candle[0]) * 1000, float(candle[6])]
+                        for candle in response_data['data']
+                    ][:count]
+                    df = pd.DataFrame(data, columns=['timestamp', 'open', 'close', 'high', 'low', 'volume', 'close_time', 'quote_volume'])
+                    df = validate_data(df)
+                    if df.empty:
+                        logger.warning(f"Geçersiz veya boş veri sonrası DataFrame boş: {symbol} ({interval}) 😕")
+                        return {'data': []}
+                    logger.info(f"KuCoin kline response for {symbol} ({interval}): {df.head().to_dict()}")
+                    return {'data': df.values.tolist()}
+                else:
+                    logger.warning(f"No KuCoin kline data for {symbol} ({interval}): {response_data}")
+                    return {'data': []}
+            else:
+                logger.error(f"Failed to fetch KuCoin kline data for {symbol} ({interval}): {response.status} 😢")
+                return {'data': []}
+    except Exception as e:
+        logger.error(f"Error fetching KuCoin kline data for {symbol} ({interval}): {e} 😞")
+        return {'data': []}
+    finally:
+        await asyncio.sleep(0.5)  # Rate limit için daha uzun bekleme
+        gc.collect()
     async def fetch_order_book(self, symbol):
         await self.initialize()
         try:
