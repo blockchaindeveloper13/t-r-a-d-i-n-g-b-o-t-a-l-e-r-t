@@ -818,11 +818,11 @@ def calculate_indicators(kline_data, order_book, btc_data, eth_data, symbol):
 
 class TelegramBot:
     def __init__(self):
-        self.group_id = int(os.getenv('TELEGRAM_GROUP_ID', '-1002869335730'))
+        self.group_id = int(os.getenv('GROUP_ID', '-1002869335730'))
         self.storage = Storage()
         self.kucoin = KuCoinClient()
         self.deepseek = DeepSeekClient()
-        bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
+        bot_token = os.getenv('TELEGRAM_TOKEN')
         self.app = Application.builder().token(bot_token).build()
         self.app.add_handler(CommandHandler("start", self.start))
         self.app.add_handler(CallbackQueryHandler(self.button))
