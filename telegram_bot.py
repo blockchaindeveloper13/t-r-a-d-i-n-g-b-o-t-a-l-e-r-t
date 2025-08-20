@@ -92,44 +92,45 @@ class KuCoinClient:
             logger.info("KuCoin session başlatıldı. 🚀")
 
     async def fetch_kline_data(self, symbol, interval, count=50):
-    await self.initialize()
-    try:
-        kucoin_intervals = {'1h': '1hour'}
-        if interval not in kucoin_intervals:
-            logger.error(f"Geçersiz aralık {interval} KuCoin için. 😞")
-            return {'data': []}
-        symbol_kucoin = symbol.replace('USDT', '-USDT')
-        url = f"{self.base_url}/api/v1/market/candles?type={kucoin_intervals[interval]}&symbol={symbol_kucoin}"
-        async with self.session.get(url) as response:
-            logger.info(f"Requesting KuCoin URL: {url}")
-            if response.status == 200:
-                response_data = await response.json()
-                logger.info(f"Raw KuCoin response: {response_data}")
-                if response_data['code'] == '200000' and response_data['data']:
-                    data = [
-                        [int(candle[0]) * 1000, float(candle[1]), float(candle[2]), float(candle[3]),
-                         float(candle[4]), float(candle[5]), int(candle[0]) * 1000, float(candle[6])]
-                        for candle in response_data['data']
-                    ][:count]
-                    df = pd.DataFrame(data, columns=['timestamp', 'open', 'close', 'high', 'low', 'volume', 'close_time', 'quote_volume'])
-                    df = validate_data(df)
-                    if df.empty:
-                        logger.warning(f"Geçersiz veya boş veri sonrası DataFrame boş: {symbol} ({interval}) 😕")
-                        return {'data': []}
-                    logger.info(f"KuCoin kline response for {symbol} ({interval}): {df.head().to_dict()}")
-                    return {'data': df.values.tolist()}
-                else:
-                    logger.warning(f"No KuCoin kline data for {symbol} ({interval}): {response_data}")
-                    return {'data': []}
-            else:
-                logger.error(f"Failed to fetch KuCoin kline data for {symbol} ({interval}): {response.status} 😢")
+        await self.initialize()
+        try:
+            kucoin_intervals = {'1h': '1hour'}
+            if interval not in kucoin_intervals:
+                logger.error(f"Geçersiz aralık {interval} KuCoin için. 😞")
                 return {'data': []}
-    except Exception as e:
-        logger.error(f"Error fetching KuCoin kline data for {symbol} ({interval}): {e} 😞")
-        return {'data': []}
-    finally:
-        await asyncio.sleep(0.5)  # Rate limit için daha uzun bekleme
-        gc.collect()
+            symbol_kucoin = symbol.replace('USDT', '-USDT')
+            url = f"{self.base_url}/api/v1/market/candles?type={kucoin_intervals[interval]}&symbol={symbol_kucoin}"
+            async with self.session.get(url) as response:
+                logger.info(f"Requesting KuCoin URL: {url}")
+                if response.status == 200:
+                    response_data = await response.json()
+                    logger.info(f"Raw KuCoin response: {response_data}")
+                    if response_data['code'] == '200000' and response_data['data']:
+                        data = [
+                            [int(candle[0]) * 1000, float(candle[1]), float(candle[2]), float(candle[3]),
+                             float(candle[4]), float(candle[5]), int(candle[0]) * 1000, float(candle[6])]
+                            for candle in response_data['data']
+                        ][:count]
+                        df = pd.DataFrame(data, columns=['timestamp', 'open', 'close', 'high', 'low', 'volume', 'close_time', 'quote_volume'])
+                        df = validate_data(df)
+                        if df.empty:
+                            logger.warning(f"Geçersiz veya boş veri sonrası DataFrame boş: {symbol} ({interval}) 😕")
+                            return {'data': []}
+                        logger.info(f"KuCoin kline response for {symbol} ({interval}): {df.head().to_dict()}")
+                        return {'data': df.values.tolist()}
+                    else:
+                        logger.warning(f"No KuCoin kline data for {symbol} ({interval}): {response_data}")
+                        return {'data': []}
+                else:
+                    logger.error(f"Failed to fetch KuCoin kline data for {symbol} ({interval}): {response.status} 😢")
+                    return {'data': []}
+        except Exception as e:
+            logger.error(f"Error fetching KuCoin kline data for {symbol} ({interval}): {e} 😞")
+            return {'data': []}
+        finally:
+            await asyncio.sleep(0.5)
+            gc.collect()
+
     async def fetch_order_book(self, symbol):
         await self.initialize()
         try:
@@ -157,7 +158,7 @@ class KuCoinClient:
             logger.error(f"Error fetching KuCoin order book for {symbol}: {e} 😞")
             return {'bids': [], 'asks': [], 'timestamp': 0}
         finally:
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.5)
             gc.collect()
 
     async def fetch_ticker(self, symbol):
@@ -183,7 +184,7 @@ class KuCoinClient:
             logger.error(f"Error fetching KuCoin ticker for {symbol}: {e} 😞")
             return {'symbol': symbol, 'price': '0.0'}
         finally:
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.5)
             gc.collect()
 
     async def fetch_24hr_ticker(self, symbol):
@@ -220,7 +221,7 @@ class KuCoinClient:
             logger.error(f"Error fetching KuCoin 24hr ticker for {symbol}: {e} 😞")
             return {'priceChangePercent': '0.0'}
         finally:
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.5)
             gc.collect()
 
     async def validate_symbol(self, symbol):
@@ -236,7 +237,7 @@ class KuCoinClient:
             logger.error(f"Error validating symbol {symbol}: {e} 😞")
             return False
         finally:
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.5)
             gc.collect()
 
     async def close(self):
@@ -279,7 +280,7 @@ class GrokClient:
                 async for chunk in stream:
                     if chunk.choices[0].delta.content:
                         response_text += chunk.choices[0].delta.content
-                logger.info(f"Grok response for {user_message}: {response_text}")
+                logger.info(f"Grok response for {user_message}: {response_text[:200]}...")
                 return response_text
             except RateLimitError as e:
                 if attempt == max_retries - 1:
@@ -344,7 +345,7 @@ class GrokClient:
                 async for chunk in stream:
                     if chunk.choices[0].delta.content:
                         response_text += chunk.choices[0].delta.content
-                logger.info(f"Grok analysis for {symbol}: {response_text}")
+                logger.info(f"Grok analysis for {symbol}: {response_text[:200]}...")
                 return response_text
             except RateLimitError as e:
                 if attempt == max_retries - 1:
@@ -400,6 +401,7 @@ class GrokClient:
             f"ATR > %5 ise yatırımdan uzak dur uyarısı ekle, ancak teorik pozisyon parametrelerini sağla. ⚠️ "
             f"Spot verilerini vadeli işlem için uyarla. Doğal, profesyonel ama samimi bir üslup kullan. 😄 "
             f"Giriş, take-profit ve stop-loss’u nasıl belirlediğini, hangi göstergelere (MA50, RSI, MACD, Bollinger, Stochastic, OBV) dayandığını kısaca açıkla. "
+            f"Eğer veri eksikse (örn. MACD veya Fibonacci), mevcut verilere dayanarak kısa vadeli trend tahmini yap. 📉 "
             f"Tüm veriler KuCoin’den alındı. Uzun vadeli veri eksikse, kısa vadeli verilere odaklan ve belirt. 📊\n\n"
             f"### Destek ve Direnç Hesaplama\n"
             f"Destek ve direnç seviyelerini pivot nokta yöntemiyle hesapla:\n"
@@ -407,6 +409,7 @@ class GrokClient:
             f"- Range = High - Low\n"
             f"- Destek Seviyeleri: [Pivot - Range * 0.5, Pivot - Range * 0.618, Pivot - Range]\n"
             f"- Direnç Seviyeleri: [Pivot + Range * 0.5, Pivot + Range * 0.618, Pivot + Range]\n"
+            f"Stop-loss için son kapanış fiyatından ATR’nin %50’sini düşerek veya en yakın destek seviyesini kullan. 🛑 "
             f"Seviyeleri analizde kullan ve karşılaştırma yap. Eğer ham veriler eksikse, durumu yorumda belirt. 🔍\n\n"
             f"### Ham Veriler\n"
             f"{', '.join(raw_data_formatted)}\n\n"
@@ -735,12 +738,11 @@ def calculate_indicators(kline_data, order_book, symbol):
                 if len(df) >= 50:
                     sma_50 = ta.sma(df['close'], length=50, fillna=0.0)
                     logger.info(f"{symbol} için {interval} aralığında MA50 hesaplandı: {sma_50.iloc[-1]} 📈")
-                elif len(df) >= 30:
-                    logger.warning(f"{symbol} için {interval} aralığında MA50 için yetersiz veri ({len(df)} < 50), MA30 hesaplanıyor ⚠️")
-                    sma_50 = ta.sma(df['close'], length=30, fillna=0.0)
-                    logger.info(f"{symbol} için {interval} aralığında MA30 hesaplandı: {sma_50.iloc[-1]} 📈")
+                elif len(df) >= 20:
+                    logger.warning(f"{symbol} için {interval} aralığında MA50 için yetersiz veri ({len(df)} < 50), MA20 hesaplanıyor ⚠️")
+                    sma_50 = ta.sma(df['close'], length=20, fillna=0.0)
                 else:
-                    logger.warning(f"{symbol} için {interval} aralığında MA50/MA30 için yetersiz veri ({len(df)} < 30) 😕")
+                    logger.warning(f"{symbol} için {interval} aralığında MA50/MA20 için yetersiz veri ({len(df)} < 20) 😕")
                     sma_50 = pd.Series([0.0] * len(df))
                 indicators[f'ma_{interval}'] = {
                     'ma50': float(sma_50.iloc[-1]) if not sma_50.empty and pd.notnull(sma_50.iloc[-1]) else 0.0
@@ -1055,6 +1057,12 @@ class TelegramBot:
     async def split_and_send_message(self, chat_id, message, symbol):
         """Mesajı 4096 karakter sınırına göre böl ve sırayla gönder."""
         max_length = 4096
+        if not message or message.strip() == "":
+            response = f"Kanka, {symbol} için analiz üretemedim, veri eksik olabilir. 😕 Tekrar deneyeyim mi?"
+            await self.app.bot.send_message(chat_id=chat_id, text=response)
+            self.storage.save_conversation(chat_id, symbol, response, symbol)
+            return
+
         if len(message) <= max_length:
             await self.app.bot.send_message(chat_id=chat_id, text=message)
             self.storage.save_conversation(chat_id, symbol, message, symbol)
