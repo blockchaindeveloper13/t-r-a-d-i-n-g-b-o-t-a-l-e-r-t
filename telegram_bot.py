@@ -1199,7 +1199,7 @@ class TelegramBot:
         await update.message.reply_text(response)
         self.storage.save_conversation(chat_id, text, response, symbol)
 
-        async def split_and_send_message(self, chat_id, message, symbol):
+    async def split_and_send_message(self, chat_id, message, symbol):
         """Mesajı 4096 karakter sınırına göre böl ve sırayla gönder."""
         max_length = 4096
         if not message or message.strip() == "":
