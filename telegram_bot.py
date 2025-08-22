@@ -1263,7 +1263,6 @@ class TelegramBot:
             gc.collect()
 
     async def run(self):
-    """Botu başlat ve webhook ayarla."""
         try:
             webhook_url = os.getenv('WEBHOOK_URL', f"https://mexctrading95bot-61a7539d22a7.herokuapp.com/{os.getenv('TELEGRAM_TOKEN')}")
             logger.info(f"Setting webhook: {webhook_url}")
