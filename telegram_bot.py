@@ -1267,6 +1267,7 @@ class TelegramBot:
             app_name = os.getenv('HEROKU_APP_NAME', 't-r-a-d-i-n-g-b-o-t-a-l-e-r-t-15aeeb4b3565')
             webhook_url = f"https://{app_name}.herokuapp.com/{os.getenv('TELEGRAM_TOKEN')}"
             logger.info(f"Setting webhook: {webhook_url}")
+            await self.app.initialize()  # Application'ı başlat
             await self.app.bot.set_webhook(url=webhook_url)
             port = int(os.environ.get('PORT', 8443))
             app = web.Application()
