@@ -1068,7 +1068,7 @@ async def handle_text_message(self, update: Update, context: ContextTypes.DEFAUL
     username = update.effective_user.username or update.effective_user.first_name
     text = update.message.text.lower()
     logger.info(f"Received message: {text} from user_id: {user_id}, username: {username} 📬")
-    
+
     # Grup mesajını kaydet (her kullanıcı için)
     if chat_id == self.group_id:
         self.storage.save_group_message(chat_id, user_id, username, update.message.text)
@@ -1078,11 +1078,11 @@ async def handle_text_message(self, update: Update, context: ContextTypes.DEFAUL
         logger.info(f"Message from non-authorized user (user_id: {user_id}), ignoring response.")
         return
 
-       history = self.storage.get_conversation_history(chat_id, limit=100)
-       group_messages = self.storage.get_group_messages(chat_id, limit=100)
-       context_info = f"Son konuşmalar: {history}\nGrup mesajları: {group_messages}"
+    history = self.storage.get_conversation_history(chat_id, limit=100)
+    group_messages = self.storage.get_group_messages(chat_id, limit=100)
+    context_info = f"Son konuşmalar: {history}\nGrup mesajları: {group_messages}"
 
-       # "Hatırlat" veya geçmişle ilgili sorular
+    # "Hatırlat" veya geçmişle ilgili sorular
     if "hatırlat" in text or "geçmiş" in text:
         if "geçmiş" in text:
             if not history:
