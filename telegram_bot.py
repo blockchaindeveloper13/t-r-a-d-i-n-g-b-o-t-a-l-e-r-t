@@ -266,6 +266,7 @@ class GrokClient:
             f"Mesajına uygun, akıcı ve doğal bir muhabbet kur. Eğer sembol ({symbol}) varsa, bağlama uygun şekilde atıfta bulun. 🤝 "
             f"Eğer hedef kullanıcı ({target_user}) belirtilmişse, onun mesajlarına ({target_user_messages}) dayalı bir cevap ver. 🎯 "
             f"Konuşma geçmişini ve son analizi dikkate al. Veritabanındaki tüm konuşmaları ve grup mesajlarını gözden geçirerek orijinal bir cevap üret. 🗄️ "
+            f" Deepseek kullanıcı adı @mexctrading95_bot . eğer deepseek ile fikir alışverişi yap dersem @mexctrading95_bot ismini yaz o sana cevap verecek. yaptığın analizleri onunla paylaş ve analizleri karşılaştır. "
             f"Emoji kullan, özgürce yaz! 🎉 Yanıt maks 1500 karakter olsun. Karakter sayısını yazma. 🚫\n\n"
             f"Kullanıcı mesajı: {user_message}\n"
             f"Bağlam: {context_info}\n"
