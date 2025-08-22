@@ -1263,6 +1263,7 @@ class TelegramBot:
             gc.collect()
 
     async def run(self):
+        """Botu başlat ve webhook ayarla."""
         try:
             webhook_url = os.getenv('WEBHOOK_URL', f"https://mexctrading95bot-61a7539d22a7.herokuapp.com/{os.getenv('TELEGRAM_TOKEN')}")
             logger.info(f"Setting webhook: {webhook_url}")
@@ -1281,23 +1282,23 @@ class TelegramBot:
             await self.shutdown_event.wait()
         except Exception as e:
             logger.error(f"Bot başlatma hatası: {e} 😞")
-    finally:
-        await self.kucoin.close()
-        if self.storage.conn and not self.storage.conn.closed:
-            self.storage.conn.close()
+        finally:
+            await self.kucoin.close()
+            if self.storage.conn and not self.storage.conn.closed:
+                self.storage.conn.close()
             logger.info("Bot durduruldu. 🛑")
             gc.collect()
 
     async def handle_webhook(self, request):
-    """Webhook isteklerini işle."""
+        """Webhook isteklerini işle."""
         try:
             logger.info(f"Webhook request received: {request.method} {request.path}")
             update = await request.json()
             logger.info(f"Webhook update: {update}")
             update = Update.de_json(update, self.app.bot)
-        if update is None:
-            logger.error("Webhook update could not be parsed 😞")
-            return web.Response(status=400)
+            if update is None:
+                logger.error("Webhook update could not be parsed 😞")
+                return web.Response(status=400)
             logger.info(f"Processing update: {update.update_id}, message: {getattr(update.message, 'text', 'No text')}")
             await self.app.process_update(update)
             return web.Response(status=200)
@@ -1305,10 +1306,11 @@ class TelegramBot:
             logger.error(f"Webhook işleme hatası: {str(e)} 😞")
             return web.Response(status=500)
 
-async def health_check(self, request):
-    """Sağlık kontrolü endpoint'i."""
-    logger.info("Health check requested")
-    return web.Response(text="Bot is running!")
+    async def health_check(self, request):
+        """Sağlık kontrolü endpoint'i."""
+        logger.info("Health check requested")
+        return web.Response(text="Bot is running!")
+
     def signal_handler(self, signum, frame):
         """Sinyal yakalayıcı."""
         logger.info(f"Sinyal alındı: {signum}, bot durduruluyor...")
