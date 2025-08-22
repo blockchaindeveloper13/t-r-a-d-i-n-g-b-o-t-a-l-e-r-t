@@ -602,8 +602,8 @@ class GrokClient:
             f"- Kaldıraç: Nx ⚙️\n"
             f"- Risk/Ödül: A:B 📊\n"
             f"- Trend: [Yükseliş/Düşüş/Nötr] 🚀📉\n"
-            f"Destek: [Hesaplanan seviyeler] 🛡️\n"
-            f"Direnç: [Hesaplanan seviyeler] 🏰\n"
+            f"Destek: {', '.join([f'${x:.2f}' for x in indicators.get('pivot_levels', {}).get('supports', [0.0, 0.0, 0.0])])} 🛡️\n"
+            f"Direnç: {', '.join([f'${x:.2f}' for x in indicators.get('pivot_levels', {}).get('resistances', [0.0, 0.0, 0.0])])} 🏰\n"
             f"Fibonacci: {', '.join([f'${x:.2f}' for x in fib_levels])} 📏\n"
             f"Volatilite: {indicators.get('atr_1h', 0.0):.2f}% ({'Yüksek, uzak dur! 😱' if indicators.get('atr_1h', 0.0) > 5 else 'Normal 😎'}) ⚡\n"
             f"Yorum: [Kısa, öz ama detaylı açıkla, hangi göstergelere dayandığını, giriş/take-profit/stop-loss seçim gerekçesini, yüksek volatilite varsa neden yatırımdan uzak durulmalı belirt, emoji kullan, samimi ol! 🎉 Maks 1500 karakter. Karakter sayısını yazma. 🚫]\n"
@@ -1053,7 +1053,7 @@ def calculate_indicators(kline_data, order_book, symbol):
                 ].min(axis=1)
 
             last_row = df.iloc[-1]
-            indicators[f"raw_data_{interval}"] = {
+            indicatorsбайтаf"raw_data_{interval}"] = {
                 "high": (
                     float(last_row["high"]) if pd.notnull(last_row["high"]) else 0.0
                 ),
@@ -1269,6 +1269,7 @@ def calculate_indicators(kline_data, order_book, symbol):
                 }
             )
 
+    # Fibonacci Seviyeleri
     kline_4h = kline_data.get("4h", {}).get("data", [])
     if kline_4h and len(kline_4h) >= 10:
         df = pd.DataFrame(
@@ -1312,6 +1313,76 @@ def calculate_indicators(kline_data, order_book, symbol):
             f"{symbol} için Fibonacci için yetersiz veri (4h, {len(kline_4h)} < 10) 😕"
         )
         indicators["fibonacci_levels"] = [0.0, 0.0, 0.0, 0.0, 0.0]
+
+    # Pivot, Destek ve Direnç Hesaplamaları
+    if kline_4h and len(kline_4h) >= 10:
+        try:
+            df = pd.DataFrame(
+                kline_4h,
+                columns=[
+                    "timestamp",
+                    "open",
+                    "close",
+                    "high",
+                    "low",
+                    "volume",
+                    "close_time",
+                    "quote_volume",
+                ],
+            )
+            df[["high", "low", "close"]] = df[["high", "low", "close"]].astype(float)
+            df = df.dropna()
+            if not df.empty:
+                high = df["high"].tail(10).max()
+                low = df["low"].tail(10).min()
+                close = df["close"].iloc[-1]
+                if pd.notnull(high) and pd.notnull(low) and pd.notnull(close):
+                    pivot = (high + low + close) / 3
+                    range_val = high - low
+                    indicators["pivot_levels"] = {
+                        "pivot": float(pivot),
+                        "supports": [
+                            float(pivot - range_val * 0.5),
+                            float(pivot - range_val * 0.618),
+                            float(pivot - range_val)
+                        ],
+                        "resistances": [
+                            float(pivot + range_val * 0.5),
+                            float(pivot + range_val * 0.618),
+                            float(pivot + range_val)
+                        ],
+                    }
+                    logger.info(
+                        f"{symbol} için pivot: {pivot:.2f}, Destek: {indicators['pivot_levels']['supports']}, Direnç: {indicators['pivot_levels']['resistances']} 🛡️🏰"
+                    )
+                else:
+                    indicators["pivot_levels"] = {
+                        "pivot": 0.0,
+                        "supports": [0.0, 0.0, 0.0],
+                        "resistances": [0.0, 0.0, 0.0]
+                    }
+                    logger.warning(f"{symbol} için pivot hesaplama verisi geçersiz 😕")
+            else:
+                indicators["pivot_levels"] = {
+                    "pivot": 0.0,
+                    "supports": [0.0, 0.0, 0.0],
+                    "resistances": [0.0, 0.0, 0.0]
+                }
+                logger.warning(f"{symbol} için 4h aralığında veri boş 😕")
+        except Exception as e:
+            logger.error(f"{symbol} için pivot hesaplama hatası: {e} 😞")
+            indicators["pivot_levels"] = {
+                "pivot": 0.0,
+                "supports": [0.0, 0.0, 0.0],
+                "resistances": [0.0, 0.0, 0.0]
+            }
+    else:
+        indicators["pivot_levels"] = {
+            "pivot": 0.0,
+            "supports": [0.0, 0.0, 0.0],
+            "resistances": [0.0, 0.0, 0.0]
+        }
+        logger.warniкng(f"{symbol} için pivot için yetersiz veri (4h, {len(kline_4h)} < 10) 😕")
 
     if order_book.get("bids") and order_book.get("asks"):
         try:
