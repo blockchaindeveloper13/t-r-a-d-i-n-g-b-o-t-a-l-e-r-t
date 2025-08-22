@@ -890,10 +890,7 @@ def calculate_indicators(kline_data, order_book, symbol):
             except Exception as e:
                 logger.error(f"{symbol} için {interval} aralığında SMA hatası: {e} 😞")
                 indicators[f'ma_{interval}'] = {'ma50': 0.0}
-
-            # ... geri kalan göstergeler aynı kalır ...
-    # Fibonacci ve bid/ask oranı aynı kalır
-    kline_4h = kline_data.get('4h', {}).get('data', [])
+                kline_4h = kline_data.get('4h', {}).get('data', [])
     if kline_4h and len(kline_4h) >= 10:
         df = pd.DataFrame(kline_4h, columns=['timestamp', 'open', 'close', 'high', 'low', 'volume', 'close_time', 'quote_volume'], dtype=np.float32)
         df = df.dropna()
