@@ -610,7 +610,6 @@ class GrokClient:
         )
         return prompt
 
-
 class Storage:
     def __init__(self):
         url = urlparse(os.environ["DATABASE_URL"])
@@ -1441,7 +1440,7 @@ class TelegramBot:
                     del self.active_analyses[analysis_key]
             gc.collect()
 
-   async def handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
         user_id = update.effective_user.id
         username = update.effective_user.username or update.effective_user.first_name
@@ -1578,7 +1577,6 @@ class TelegramBot:
         response = await self.grok.generate_natural_response(text, context_info, symbol)
         await update.message.reply_text(response)
         self.storage.save_conversation(chat_id, text, response, symbol)
-
 
     async def split_and_send_message(self, chat_id, message, symbol):
         """Mesajı 4096 karakter sınırına göre böl ve sırayla gönder."""
