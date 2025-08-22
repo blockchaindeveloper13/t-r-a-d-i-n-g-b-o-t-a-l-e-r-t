@@ -1063,29 +1063,29 @@ class TelegramBot:
             gc.collect()
 
     async def handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Grup mesajlarını kaydet
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    username = update.effective_user.username or update.effective_user.first_name
-    text = update.message.text.lower()
-    logger.info(f"Received message: {text} from user_id: {user_id}, username: {username} 📬")
+        # Grup mesajlarını kaydet
+        chat_id = update.effective_chat.id
+        user_id = update.effective_user.id
+        username = update.effective_user.username or update.effective_user.first_name
+        text = update.message.text.lower()
+        logger.info(f"Received message: {text} from user_id: {user_id}, username: {username} 📬")
 
-    # Grup mesajını kaydet (her kullanıcı için)
-    if chat_id == self.group_id:
-        self.storage.save_group_message(chat_id, user_id, username, update.message.text)
+        # Grup mesajını kaydet (her kullanıcı için)
+        if chat_id == self.group_id:
+            self.storage.save_group_message(chat_id, user_id, username, update.message.text)
 
-    # @traderbot95_bot etiketi varsa veya yetkili kullanıcıysa cevap ver
-    if '@traderbot95_bot' in text or user_id == AUTHORIZED_USER_ID:
-        logger.info(f"Responding to message with @traderbot95_bot or from authorized user (user_id: {user_id})")
-    else:
-        logger.info(f"Message from non-authorized user (user_id: {user_id}) without @traderbot95_bot, ignoring response.")
+        # @traderbot95_bot etiketi varsa veya yetkili kullanıcıysa cevap ver
+        if '@traderbot95_bot' in text or user_id == AUTHORIZED_USER_ID:
+            logger.info(f"Responding to message with @traderbot95_bot or from authorized user (user_id: {user_id})")
+        else:
+            logger.info(f"Message from non-authorized user (user_id: {user_id}) without @traderbot95_bot, ignoring response.")
         return
 
-        history = self.storage.get_conversation_history(chat_id, limit=100)
-        group_messages = self.storage.get_group_messages(chat_id, limit=100)
-        context_info = f"Son konuşmalar: {history}\nGrup mesajları: {group_messages}"
+            history = self.storage.get_conversation_history(chat_id, limit=100)
+            group_messages = self.storage.get_group_messages(chat_id, limit=100)
+            context_info = f"Son konuşmalar: {history}\nGrup mesajları: {group_messages}"
 
-        # "Hatırlat" veya geçmişle ilgili sorular
+            # "Hatırlat" veya geçmişle ilgili sorular
         if "hatırlat" in text or "geçmiş" in text:
             if "geçmiş" in text:
                 if not history:
