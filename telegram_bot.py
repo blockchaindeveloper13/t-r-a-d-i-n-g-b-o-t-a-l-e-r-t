@@ -1061,7 +1061,7 @@ class TelegramBot:
                     del self.active_analyses[analysis_key]
             gc.collect()
 
-   async def handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+ async def handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Grup mesajlarını kaydet
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
