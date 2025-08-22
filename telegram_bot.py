@@ -1287,7 +1287,7 @@ class TelegramBot:
         await self.app.shutdown()
         await self.app.cleanup()
         await self.kucoin.close()
-    if self.storage.conn and not self.storage.conn.closed:
+        if self.storage.conn and not self.storage.conn.closed:
         self.storage.conn.close()
         logger.info("Bot durduruldu. 🛑")
         gc.collect()
