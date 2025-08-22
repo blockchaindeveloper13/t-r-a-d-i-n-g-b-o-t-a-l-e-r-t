@@ -261,7 +261,7 @@ class GrokClient:
     async def generate_natural_response(self, user_message, context_info, symbol=None, target_user=None, target_user_messages=None):
         logger.info(f"Generating natural response for message: {user_message}, target_user: {target_user}")
         prompt = (
-            f"Türkçe, ultra samimi ve esprili bir şekilde yanıt ver. Kullanıcıya 'kanka' diye hitap et, hafif argo kullan ama abartma. 😎 "
+            f"Senin adın grok . sana grok diye seslenirsem cevap ver. Türkçe, ultra samimi ve esprili bir şekilde yanıt ver. Kullanıcıya 'kanka' diye hitap et, hafif argo kullan ama abartma. 😎 "
             f"KALIN YAZI İÇİN ** KULLANMA, bunun yerine düz metin veya emoji kullan. 🚫 "
             f"Mesajına uygun, akıcı ve doğal bir muhabbet kur. Eğer sembol ({symbol}) varsa, bağlama uygun şekilde atıfta bulun. 🤝 "
             f"Eğer hedef kullanıcı ({target_user}) belirtilmişse, onun mesajlarına ({target_user_messages}) dayalı bir cevap ver. 🎯 "
