@@ -807,7 +807,8 @@ def calculate_indicators(kline_data, order_book, symbol):
                 f'bbands_{interval}': {'upper': 0.0, 'lower': 0.0},
                 f'stoch_{interval}': {'k': 0.0, 'd': 0.0},
                 f'obv_{interval}': 0.0,
-                f'raw_data_{interval}': {'high': 0.0, 'low': 0.0, 'close': 0.0}
+                f'raw_data_{interval}': {'high': 0.0, 'low': 0.0, 'close': 0.0},
+                f'pivot_{interval}': {'pivot': 0.0, 'support': [0.0, 0.0, 0.0], 'resistance': [0.0, 0.0, 0.0]}
             })
             continue
 
@@ -827,7 +828,8 @@ def calculate_indicators(kline_data, order_book, symbol):
                     f'bbands_{interval}': {'upper': 0.0, 'lower': 0.0},
                     f'stoch_{interval}': {'k': 0.0, 'd': 0.0},
                     f'obv_{interval}': 0.0,
-                    f'raw_data_{interval}': {'high': 0.0, 'low': 0.0, 'close': 0.0}
+                    f'raw_data_{interval}': {'high': 0.0, 'low': 0.0, 'close': 0.0},
+                    f'pivot_{interval}': {'pivot': 0.0, 'support': [0.0, 0.0, 0.0], 'resistance': [0.0, 0.0, 0.0]}
                 })
                 continue
 
@@ -843,59 +845,100 @@ def calculate_indicators(kline_data, order_book, symbol):
             }
 
             # Pivot ve Destek/Direnç Hesaplama
-            try:
-                last_high = float(df['high'].tail(10).max())
-                last_low = float(df['low'].tail(10).min())
-                last_close = float(df['close'].iloc[-1])
-                if pd.notnull([last_high, last_low, last_close]) and last_high >= last_low:
-                    pivot = (last_high + last_low + last_close) / 3
-                    price_range = last_high - last_low
-                    support_levels = [
-                        pivot - price_range * 0.5,
-                        pivot - price_range * 0.618,
-                        pivot - price_range
-                    ]
-                    resistance_levels = [
-                        pivot + price_range * 0.5,
-                        pivot + price_range * 0.618,
-                        pivot + price_range
-                    ]
-                    indicators[f'pivot_{interval}'] = {
-                        'pivot': pivot,
-                        'support': [float(x) for x in support_levels],
-                        'resistance': [float(x) for x in resistance_levels]
-                    }
-                    logger.info(f"{symbol} için {interval} pivot: {pivot}, destek: {support_levels}, direnç: {resistance_levels}")
-                else:
-                    logger.warning(f"{symbol} için {interval} pivot hesaplama için geçersiz veri 😕")
-                    indicators[f'pivot_{interval}'] = {'pivot': 0.0, 'support': [0.0, 0.0, 0.0], 'resistance': [0.0, 0.0, 0.0]}
-            except Exception as e:
-                logger.error(f"{symbol} için {interval} pivot hesaplama hatası: {e} 😞")
+            last_high = float(df['high'].tail(10).max())
+            last_low = float(df['low'].tail(10).min())
+            last_close = float(df['close'].iloc[-1])
+            if pd.notnull([last_high, last_low, last_close]) and last_high >= last_low:
+                pivot = (last_high + last_low + last_close) / 3
+                price_range = last_high - last_low
+                support_levels = [
+                    pivot - price_range * 0.5,
+                    pivot - price_range * 0.618,
+                    pivot - price_range
+                ]
+                resistance_levels = [
+                    pivot + price_range * 0.5,
+                    pivot + price_range * 0.618,
+                    pivot + price_range
+                ]
+                indicators[f'pivot_{interval}'] = {
+                    'pivot': float(pivot),
+                    'support': [float(x) for x in support_levels],
+                    'resistance': [float(x) for x in resistance_levels]
+                }
+                logger.info(f"{symbol} için {interval} pivot: {pivot}, destek: {support_levels}, direnç: {resistance_levels}")
+            else:
+                logger.warning(f"{symbol} için {interval} pivot hesaplama için geçersiz veri 😕")
                 indicators[f'pivot_{interval}'] = {'pivot': 0.0, 'support': [0.0, 0.0, 0.0], 'resistance': [0.0, 0.0, 0.0]}
 
-            # Mevcut göstergeler (MA, RSI, vb.) aynı kalır
-            try:
-                if len(df) >= 50:
-                    sma_50 = ta.sma(df['close'], length=50, fillna=0.0)
-                    logger.info(f"{symbol} için {interval} aralığında MA50 hesaplandı: {sma_50.iloc[-1]} 📈")
-                elif len(df) >= 20:
-                    logger.warning(f"{symbol} için {interval} aralığında MA50 için yetersiz veri ({len(df)} < 50), MA20 hesaplanıyor ⚠️")
-                    sma_50 = ta.sma(df['close'], length=20, fillna=0.0)
-                else:
-                    logger.warning(f"{symbol} için {interval} aralığında MA50/MA20 için yetersiz veri ({len(df)} < 20) 😕")
-                    sma_50 = pd.Series([0.0] * len(df))
-                indicators[f'ma_{interval}'] = {
-                    'ma50': float(sma_50.iloc[-1]) if not sma_50.empty and pd.notnull(sma_50.iloc[-1]) else 0.0
+            # Mevcut göstergeler (MA, RSI, vb.)
+            if len(df) >= 50:
+                sma_50 = ta.sma(df['close'], length=50, fillna=0.0)
+                logger.info(f"{symbol} için {interval} aralığında MA50 hesaplandı: {sma_50.iloc[-1]} 📈")
+            elif len(df) >= 20:
+                logger.warning(f"{symbol} için {interval} aralığında MA50 için yetersiz veri ({len(df)} < 50), MA20 hesaplanıyor ⚠️")
+                sma_50 = ta.sma(df['close'], length=20, fillna=0.0)
+            else:
+                logger.warning(f"{symbol} için {interval} aralığında MA50/MA20 için yetersiz veri ({len(df)} < 20) 😕")
+                sma_50 = pd.Series([0.0] * len(df))
+            indicators[f'ma_{interval}'] = {
+                'ma50': float(sma_50.iloc[-1]) if not sma_50.empty and pd.notnull(sma_50.iloc[-1]) else 0.0
+            }
+
+            rsi = ta.rsi(df['close'], length=14, fillna=50.0) if len(df) >= 14 else pd.Series([50.0] * len(df))
+            indicators[f'rsi_{interval}'] = float(rsi.iloc[-1]) if not rsi.empty and pd.notnull(rsi.iloc[-1]) else 50.0
+
+            atr = ta.atr(df['high'], df['low'], df['close'], length=14, fillna=0.0) if len(df) >= 14 else pd.Series([0.0] * len(df))
+            indicators[f'atr_{interval}'] = (float(atr.iloc[-1]) / float(df['close'].iloc[-1]) * 100) if not atr.empty and pd.notnull(atr.iloc[-1]) and df['close'].iloc[-1] != 0 else 0.0
+
+            if len(df) >= 26:
+                ema_12 = safe_ema(df['close'], 12)
+                ema_26 = safe_ema(df['close'], 26)
+                macd_line = ema_12 - ema_26
+                signal_line = safe_ema(macd_line, 9) if not macd_line.isna().all() else pd.Series([0.0] * len(df))
+                indicators[f'macd_{interval}'] = {
+                    'macd': float(macd_line.iloc[-1]) if pd.notnull(macd_line.iloc[-1]) else 0.0,
+                    'signal': float(signal_line.iloc[-1]) if pd.notnull(signal_line.iloc[-1]) else 0.0
                 }
-            except Exception as e:
-                logger.error(f"{symbol} için {interval} aralığında SMA hatası: {e} 😞")
-                indicators[f'ma_{interval}'] = {'ma50': 0.0}
-                kline_4h = kline_data.get('4h', {}).get('data', [])
-    if kline_4h and len(kline_4h) >= 10:
-        df = pd.DataFrame(kline_4h, columns=['timestamp', 'open', 'close', 'high', 'low', 'volume', 'close_time', 'quote_volume'], dtype=np.float32)
-        df = df.dropna()
-        if not df.empty:
-            try:
+            else:
+                indicators[f'macd_{interval}'] = {'macd': 0.0, 'signal': 0.0}
+
+            bbands = ta.bbands(df['close'], length=20, std=2, fillna=0.0) if len(df) >= 20 else None
+            indicators[f'bbands_{interval}'] = {
+                'upper': float(bbands['BBU_20_2.0'].iloc[-1]) if bbands is not None and not bbands.empty and pd.notnull(bbands['BBU_20_2.0'].iloc[-1]) else 0.0,
+                'lower': float(bbands['BBL_20_2.0'].iloc[-1]) if bbands is not None and not bbands.empty and pd.notnull(bbands['BBL_20_2.0'].iloc[-1]) else 0.0
+            }
+
+            stoch = ta.stoch(df['high'], df['low'], df['close'], k=14, d=3, smooth_k=3, fillna=0.0) if len(df) >= 14 else None
+            indicators[f'stoch_{interval}'] = {
+                'k': float(stoch['STOCHk_14_3_3'].iloc[-1]) if stoch is not None and not stoch.empty and pd.notnull(stoch['STOCHk_14_3_3'].iloc[-1]) else 0.0,
+                'd': float(stoch['STOCHd_14_3_3'].iloc[-1]) if stoch is not None and not stoch.empty and pd.notnull(stoch['STOCHd_14_3_3'].iloc[-1]) else 0.0
+            }
+
+            obv = ta.obv(df['close'], df['volume'], fillna=0.0) if len(df) >= 1 else pd.Series([0.0] * len(df))
+            indicators[f'obv_{interval}'] = float(obv.iloc[-1]) if not obv.empty and pd.notnull(obv.iloc[-1]) else 0.0
+
+        except Exception as e:
+            logger.error(f"{symbol} için {interval} aralığında göstergeler hesaplanırken hata: {e} 😞")
+            indicators.update({
+                f'ma_{interval}': {'ma50': 0.0},
+                f'rsi_{interval}': 50.0,
+                f'atr_{interval}': 0.0,
+                f'macd_{interval}': {'macd': 0.0, 'signal': 0.0},
+                f'bbands_{interval}': {'upper': 0.0, 'lower': 0.0},
+                f'stoch_{interval}': {'k': 0.0, 'd': 0.0},
+                f'obv_{interval}': 0.0,
+                f'raw_data_{interval}': {'high': 0.0, 'low': 0.0, 'close': 0.0},
+                f'pivot_{interval}': {'pivot': 0.0, 'support': [0.0, 0.0, 0.0], 'resistance': [0.0, 0.0, 0.0]}
+            })
+
+    # Fibonacci Hesaplama
+    try:
+        kline_4h = kline_data.get('4h', {}).get('data', [])
+        if kline_4h and len(kline_4h) >= 10:
+            df = pd.DataFrame(kline_4h, columns=['timestamp', 'open', 'close', 'high', 'low', 'volume', 'close_time', 'quote_volume'], dtype=np.float32)
+            df = df.dropna()
+            if not df.empty:
                 high = df['high'].tail(10).max()
                 low = df['low'].tail(10).min()
                 if pd.notnull(high) and pd.notnull(low) and high >= low:
@@ -910,13 +953,17 @@ def calculate_indicators(kline_data, order_book, symbol):
                     logger.info(f"{symbol} için 4h aralığında Fibonacci seviyeleri hesaplandı: {indicators['fibonacci_levels']} 📏")
                 else:
                     indicators['fibonacci_levels'] = [0.0, 0.0, 0.0, 0.0, 0.0]
-            except Exception as e:
-                logger.error(f"{symbol} için 4h aralığında Fibonacci hatası: {e} 😞")
+            else:
+                logger.warning(f"{symbol} için Fibonacci için yetersiz veri (4h, boş DataFrame) 😕")
                 indicators['fibonacci_levels'] = [0.0, 0.0, 0.0, 0.0, 0.0]
-    else:
-        logger.warning(f"{symbol} için Fibonacci için yetersiz veri (4h, {len(kline_4h)} < 10) 😕")
+        else:
+            logger.warning(f"{symbol} için Fibonacci için yetersiz veri (4h, {len(kline_4h)} < 10) 😕")
+            indicators['fibonacci_levels'] = [0.0, 0.0, 0.0, 0.0, 0.0]
+    except Exception as e:
+        logger.error(f"{symbol} için 4h aralığında Fibonacci hatası: {e} 😞")
         indicators['fibonacci_levels'] = [0.0, 0.0, 0.0, 0.0, 0.0]
 
+    # Bid/Ask Oranı
     if order_book.get('bids') and order_book.get('asks'):
         try:
             bid_volume = sum(float(bid[1]) for bid in order_book['bids'])
