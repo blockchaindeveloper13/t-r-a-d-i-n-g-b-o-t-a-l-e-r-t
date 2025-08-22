@@ -258,15 +258,19 @@ class GrokClient:
         self.model = "grok-4-0709"
         self.kucoin = kucoin_client
 
-    async def generate_natural_response(self, user_message, context_info, symbol=None):
-        logger.info(f"Generating natural response for message: {user_message}")
+    async def generate_natural_response(self, user_message, context_info, symbol=None, target_user=None, target_user_messages=None):
+        logger.info(f"Generating natural response for message: {user_message}, target_user: {target_user}")
         prompt = (
             f"Türkçe, ultra samimi ve esprili bir şekilde yanıt ver. Kullanıcıya 'kanka' diye hitap et, hafif argo kullan ama abartma. 😎 "
             f"KALIN YAZI İÇİN ** KULLANMA, bunun yerine düz metin veya emoji kullan. 🚫 "
             f"Mesajına uygun, akıcı ve doğal bir muhabbet kur. Eğer sembol ({symbol}) varsa, bağlama uygun şekilde atıfta bulun. 🤝 "
-            f"Konuşma geçmişini ve son analizi dikkate al. Emoji kullan, özgürce yaz! 🎉 Yanıt maks 1500 karakter olsun. Karakter sayısını yazma. 🚫\n\n"
+            f"Eğer hedef kullanıcı ({target_user}) belirtilmişse, onun mesajlarına ({target_user_messages}) dayalı bir cevap ver. 🎯 "
+            f"Konuşma geçmişini ve son analizi dikkate al. Veritabanındaki tüm konuşmaları ve grup mesajlarını gözden geçirerek orijinal bir cevap üret. 🗄️ "
+            f"Emoji kullan, özgürce yaz! 🎉 Yanıt maks 1500 karakter olsun. Karakter sayısını yazma. 🚫\n\n"
             f"Kullanıcı mesajı: {user_message}\n"
             f"Bağlam: {context_info}\n"
+            f"Hedef kullanıcı: {target_user or 'Yok'}\n"
+            f"Hedef kullanıcının mesajları: {target_user_messages or 'Yok'}\n"
         )
         max_retries = 5
         for attempt in range(max_retries):
@@ -275,7 +279,7 @@ class GrokClient:
                 response = await self.client.chat.completions.create(
                     model=self.model,
                     messages=[
-                        {"role": "system", "content": "Sen kanka gibi konuşan, samimi bir trading botusun. Türkçe, esprili ve doğal cevaplar ver. Yanıt sonunda karakter sayısını yazma."},
+                        {"role": "system", "content": "Sen kanka gibi konuşan, samimi bir trading botusun. Türkçe, esprili ve doğal cevaplar ver. Veritabanındaki konuşma geçmişini ve grup mesajlarını dikkate al. Yanıt sonunda karakter sayısını yazma."},
                         {"role": "user", "content": prompt}
                     ],
                     max_tokens=1000,
@@ -497,7 +501,7 @@ class Storage:
         logger.info("PostgreSQL veritabanı başlatıldı. 🗄️")
 
     def init_db(self):
-        """PostgreSQL tablolarını oluştur."""
+        """PostgreSQL tablolarını oluştur. Yeni group_messages tablosu eklendi."""
         try:
             with self.conn.cursor() as cur:
                 cur.execute("""
@@ -517,6 +521,17 @@ class Storage:
                         bot_response TEXT,
                         timestamp TEXT,
                         symbol TEXT
+                    )
+                """)
+                # Yeni tablo: Grup mesajlarını kaydetmek için
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS group_messages (
+                        id SERIAL PRIMARY KEY,
+                        chat_id BIGINT,
+                        user_id BIGINT,
+                        username TEXT,
+                        message TEXT,
+                        timestamp TEXT
                     )
                 """)
                 self.conn.commit()
@@ -566,6 +581,28 @@ class Storage:
                 logger.info(f"Konuşma kaydedildi (chat_id: {chat_id}). 💬")
         except psycopg2.Error as e:
             logger.error(f"PostgreSQL konuşma kaydetme hatası: {e} 😞")
+            self.conn.rollback()
+        finally:
+            gc.collect()
+
+    def save_group_message(self, chat_id, user_id, username, message):
+        """Grup mesajlarını PostgreSQL’e kaydet."""
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO group_messages (chat_id, user_id, username, message, timestamp)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (
+                    chat_id,
+                    user_id,
+                    username or 'Bilinmeyen',
+                    message,
+                    datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                ))
+                self.conn.commit()
+                logger.info(f"Grup mesajı kaydedildi (chat_id: {chat_id}, user_id: {user_id}). 💬")
+        except psycopg2.Error as e:
+            logger.error(f"PostgreSQL grup mesajı kaydetme hatası: {e} 😞")
             self.conn.rollback()
         finally:
             gc.collect()
@@ -626,6 +663,35 @@ class Storage:
         finally:
             gc.collect()
 
+    def get_group_messages(self, chat_id, username=None, limit=100):
+        """Grup mesajlarını getir, isteğe bağlı olarak kullanıcı adına göre filtrele."""
+        try:
+            with self.conn.cursor() as cur:
+                if username:
+                    cur.execute("""
+                        SELECT user_id, username, message, timestamp 
+                        FROM group_messages 
+                        WHERE chat_id = %s AND username = %s 
+                        ORDER BY timestamp DESC 
+                        LIMIT %s
+                    """, (chat_id, username, limit))
+                else:
+                    cur.execute("""
+                        SELECT user_id, username, message, timestamp 
+                        FROM group_messages 
+                        WHERE chat_id = %s 
+                        ORDER BY timestamp DESC 
+                        LIMIT %s
+                    """, (chat_id, limit))
+                results = cur.fetchall()
+                logger.info(f"Grup mesajları alındı (chat_id: {chat_id}, username: {username or 'Tümü'}). 💬")
+                return [{'user_id': row[0], 'username': row[1], 'message': row[2], 'timestamp': row[3]} for row in results]
+        except psycopg2.Error as e:
+            logger.error(f"PostgreSQL grup mesajları alma hatası: {e} 😞")
+            return []
+        finally:
+            gc.collect()
+
     def get_last_symbol(self, chat_id):
         """Son kullanılan sembolü getir."""
         try:
@@ -654,6 +720,7 @@ class Storage:
                 cutoff = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d %H:%M:%S')
                 cur.execute("DELETE FROM analyses WHERE timestamp < %s", (cutoff,))
                 cur.execute("DELETE FROM conversations WHERE timestamp < %s", (cutoff,))
+                cur.execute("DELETE FROM group_messages WHERE timestamp < %s", (cutoff,))
                 self.conn.commit()
                 logger.info("7 günden eski veriler temizlendi. 🧹")
                 return "Kanka, 7 günden eski veriler silindi, yer açtık! 🚀"
@@ -673,6 +740,7 @@ class Storage:
                 cutoff = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d %H:%M:%S')
                 cur.execute("DELETE FROM analyses WHERE timestamp < %s", (cutoff,))
                 cur.execute("DELETE FROM conversations WHERE timestamp < %s", (cutoff,))
+                cur.execute("DELETE FROM group_messages WHERE timestamp < %s", (cutoff,))
                 self.conn.commit()
                 logger.info("3 günden eski veriler temizlendi. 🧹")
                 return "Kanka, 3 günden eski veriler silindi, tertemiz oldu! 🚀"
@@ -691,6 +759,7 @@ class Storage:
             with self.conn.cursor() as cur:
                 cur.execute("DELETE FROM analyses")
                 cur.execute("DELETE FROM conversations")
+                cur.execute("DELETE FROM group_messages")
                 self.conn.commit()
                 logger.info("Tüm veritabanı sıfırlandı. 🧹")
                 return "Kanka, veritabanı komple sıfırlandı, sıfırdan başlıyoruz! 🚀"
@@ -924,7 +993,6 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("clear_7days", self.clear_7days))
         self.app.add_handler(CommandHandler("clear_3days", self.clear_3days))
         self.app.add_handler(CommandHandler("clear_all", self.clear_all))
-        self.app.add_handler(CommandHandler("full_analysis", self.check_full_analysis))
         self.app.add_handler(CallbackQueryHandler(self.button))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text_message))
         self.active_analyses = {}
@@ -939,24 +1007,11 @@ class TelegramBot:
         ]
         response = (
             "Kanka, hadi bakalım! Coin analizi mi yapalım, yoksa başka muhabbet mi çevirelim? 😎\n"
-            "Örnek: 'ADA analiz', 'nasılsın', 'geçmiş'.\n"
+            "Örnek: 'ADA analiz', 'nasılsın', 'geçmiş', 'falanca ne dedi?', 'ona ne cevap verirdin?'.\n"
             "Veritabanı temizleme için: /clear_7days, /clear_3days, /clear_all (sadece sen kullanabilirsin!).\n"
-            "Son analizi görmek için: /full_analysis\n"
         )
         await update.message.reply_text(response, reply_markup=InlineKeyboardMarkup(keyboard))
         self.storage.save_conversation(update.effective_chat.id, update.message.text, response)
-
-    async def check_full_analysis(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        symbol = self.storage.get_last_symbol(update.effective_chat.id)
-        if symbol:
-            full_analysis = self.storage.get_latest_analysis(symbol)
-            if full_analysis:
-                await update.message.reply_text(f"Kanka, {symbol} için tam analiz:\n{full_analysis}")
-            else:
-                await update.message.reply_text(f"Kanka, {symbol} için analiz bulunamadı. 😕")
-        else:
-            await update.message.reply_text("Kanka, son sembol bulunamadı. Bi’ coin seç! 😎")
-        self.storage.save_conversation(update.effective_chat.id, "Tam analiz kontrolü", full_analysis or "Analiz yok", symbol)
 
     async def clear_7days(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         response = await self.storage.clear_7days(update.effective_chat.id)
@@ -1006,16 +1061,30 @@ class TelegramBot:
                     del self.active_analyses[analysis_key]
             gc.collect()
 
-    async def handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        text = update.message.text.lower()
-        chat_id = update.effective_chat.id
-        logger.info(f"Received message: {text} 📬")
+   async def handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Grup mesajlarını kaydet
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    username = update.effective_user.username or update.effective_user.first_name
+    text = update.message.text.lower()
+    logger.info(f"Received message: {text} from user_id: {user_id}, username: {username} 📬")
+    
+    # Grup mesajını kaydet (her kullanıcı için)
+    if chat_id == self.group_id:
+        self.storage.save_group_message(chat_id, user_id, username, update.message.text)
 
-        history = self.storage.get_conversation_history(chat_id, limit=100)
-        context_info = f"Son konuşmalar: {history}"
+    # Sadece yetkili kullanıcıya (sana) cevap ver
+    if user_id != AUTHORIZED_USER_ID:
+        logger.info(f"Message from non-authorized user (user_id: {user_id}), ignoring response.")
+        return
 
+    history = self.storage.get_conversation_history(chat_id, limit=100)
+    group_messages = self.storage.get_group_messages(chat_id, limit=100)
+    context_info = f"Son konuşmalar: {history}\nGrup mesajları: {group_messages}"
+
+    # "Hatırlat" veya geçmişle ilgili sorular
+    if "hatırlat" in text or "geçmiş" in text:
         if "geçmiş" in text:
-            history = self.storage.get_conversation_history(chat_id, limit=100)
             if not history:
                 response = "Kanka, henüz muhabbet geçmişimiz yok. Hadi başlayalım! 😄"
             else:
@@ -1028,196 +1097,225 @@ class TelegramBot:
             await update.message.reply_text(response)
             self.storage.save_conversation(chat_id, text, response)
             return
+        else:
+            response = await self.grok.generate_natural_response(text, context_info)
+            await update.message.reply_text(response)
+            self.storage.save_conversation(chat_id, text, response)
+            return
 
-        symbol = None
-        for coin, aliases in COINS.items():
-            if any(alias in text for alias in aliases):
-                symbol = coin
-                break
+    # "Falanca kişi ne dedi?" veya "Ona ne cevap verirsin?" tarzı sorular
+    target_user = None
+    if "ne diyor" in text or "ne cevap verirsin" in text or "ne dedi" in text:
+        # Kullanıcı adını metinden çıkar
+        match = re.search(r'(?:@(\w+)|(\w+))\s*(?:ne diyor|ne dedi|ona ne cevap|ona ne dersin)', text, re.IGNORECASE)
+        if match:
+            target_user = match.group(1) or match.group(2)
+            target_user_messages = self.storage.get_group_messages(chat_id, username=target_user, limit=10)
+            if not target_user_messages:
+                response = f"Kanka, @{target_user} grupta bi’ şey dememiş gibi, ya da ben kaçırmışım. 😅 Başka ne bakalım?"
+                await update.message.reply_text(response)
+                self.storage.save_conversation(chat_id, text, response)
+                return
+            target_user_messages_str = "\n".join([f"{msg['timestamp']}: {msg['message']}" for msg in target_user_messages])
+            response = await self.grok.generate_natural_response(
+                text, context_info, symbol=None, target_user=target_user, target_user_messages=target_user_messages_str
+            )
+            await update.message.reply_text(response)
+            self.storage.save_conversation(chat_id, text, response)
+            return
 
-        if not symbol:
-            symbol = self.storage.get_last_symbol(chat_id)
-            if symbol:
-                logger.info(f"Using last symbol {symbol} from conversation history 📜")
+    symbol = None
+    for coin, aliases in COINS.items():
+        if any(alias in text for alias in aliases):
+            symbol = coin
+            break
 
-        keywords = ['analiz', 'trend', 'long', 'short', 'destek', 'direnç', 'yorum', 'neden']
-        matched_keyword = next((k for k in keywords if k in text), None)
+    if not symbol:
+        symbol = self.storage.get_last_symbol(chat_id)
+        if symbol:
+            logger.info(f"Using last symbol {symbol} from conversation history 📜")
 
-        context_info += f"\nSon {symbol} analizi: {self.storage.get_latest_analysis(symbol) or 'Yok' if symbol else 'Yok'}"
+    keywords = ['analiz', 'trend', 'long', 'short', 'destek', 'direnç', 'yorum', 'neden']
+    matched_keyword = next((k for k in keywords if k in text), None)
 
-        if matched_keyword == 'analiz' and symbol:
-            analysis_key = f"{symbol}_futures_{chat_id}"
-            async with self.analysis_lock:
-                if analysis_key in self.active_analyses:
-                    response = f"Kanka, {symbol} için analiz yapıyorum, az bekle! ⏳"
-                    await update.message.reply_text(response)
-                    self.storage.save_conversation(chat_id, text, response, symbol)
-                    return
-                self.active_analyses[analysis_key] = True
-            try:
-                if not await self.kucoin.validate_symbol(symbol):
-                    response = f"Kanka, {symbol} piyasada yok gibi. Başka coin mi bakalım? 🤔"
-                    await update.message.reply_text(response)
-                    self.storage.save_conversation(chat_id, text, response, symbol)
-                    return
-                response = f"{symbol} için analiz yapıyorum, hemen geliyor! 🚀"
+    context_info += f"\nSon {symbol} analizi: {self.storage.get_latest_analysis(symbol) or 'Yok' if symbol else 'Yok'}"
+
+    if matched_keyword == 'analiz' and symbol:
+        analysis_key = f"{symbol}_futures_{chat_id}"
+        async with self.analysis_lock:
+            if analysis_key in self.active_analyses:
+                response = f"Kanka, {symbol} için analiz yapıyorum, az bekle! ⏳"
                 await update.message.reply_text(response)
                 self.storage.save_conversation(chat_id, text, response, symbol)
-                task = self.process_coin(symbol, chat_id)
-                if task is not None:
-                    asyncio.create_task(task)
-            finally:
-                async with self.analysis_lock:
-                    if analysis_key in self.active_analyses:
-                        del self.active_analyses[analysis_key]
-            return
-
-        if matched_keyword and symbol:
-            current_analysis = self.storage.get_latest_analysis(symbol)
-            response = await self.grok.generate_natural_response(text, context_info, symbol)
-            if current_analysis:
-                if matched_keyword == 'trend':
-                    trend_match = re.search(r'Trend: (.*?)(?:\n|$)', current_analysis, re.DOTALL)
-                    response += f"\nTrend: {trend_match.group(1) if trend_match else 'Bilinmiyor'} 🚀📉"
-                elif matched_keyword == 'long':
-                    long_match = re.search(r'Long Pozisyon:(.*?)(?:Short|$)', current_analysis, re.DOTALL)
-                    response += f"\nLong: {long_match.group(1).strip() if long_match else 'Bilinmiyor'} 📈"
-                elif matched_keyword == 'short':
-                    short_match = re.search(r'Short Pozisyon:(.*?)(?:Yorum|$)', current_analysis, re.DOTALL)
-                    response += f"\nShort: {short_match.group(1).strip() if short_match else 'Bilinmiyor'} 📉"
-                elif matched_keyword == 'destek':
-                    support_match = re.search(r'Destek: (.*?)(?:\n|$)', current_analysis, re.DOTALL)
-                    response += f"\nDestek: {support_match.group(1) if support_match else 'Bilinmiyor'} 🛡️"
-                elif matched_keyword == 'direnç':
-                    resistance_match = re.search(r'Direnç: (.*?)(?:\n|$)', current_analysis, re.DOTALL)
-                    response += f"\nDirenç: {resistance_match.group(1) if resistance_match else 'Bilinmiyor'} 🏰"
-                elif matched_keyword in ['yorum', 'neden']:
-                    comment_match = re.search(r'Yorum:(.*)', current_analysis, re.DOTALL)
-                    response += f"\nYorum: {comment_match.group(1).strip() if comment_match else 'Bilinmiyor'} 💬"
-            else:
-                response += f"\nKanka, {symbol} için analiz yok. Hemen yapayım mı? (örn: {symbol} analiz) 😄"
+                return
+            self.active_analyses[analysis_key] = True
+        try:
+            if not await self.kucoin.validate_symbol(symbol):
+                response = f"Kanka, {symbol} piyasada yok gibi. Başka coin mi bakalım? 🤔"
+                await update.message.reply_text(response)
+                self.storage.save_conversation(chat_id, text, response, symbol)
+                return
+            response = f"{symbol} için analiz yapıyorum, hemen geliyor! 🚀"
             await update.message.reply_text(response)
             self.storage.save_conversation(chat_id, text, response, symbol)
-            return
+            task = self.process_coin(symbol, chat_id)
+            if task is not None:
+                asyncio.create_task(task)
+        finally:
+            async with self.analysis_lock:
+                if analysis_key in self.active_analyses:
+                    del self.active_analyses[analysis_key]
+        return
 
+    if matched_keyword and symbol:
+        current_analysis = self.storage.get_latest_analysis(symbol)
         response = await self.grok.generate_natural_response(text, context_info, symbol)
+        if current_analysis:
+            if matched_keyword == 'trend':
+                trend_match = re.search(r'Trend: (.*?)(?:\n|$)', current_analysis, re.DOTALL)
+                response += f"\nTrend: {trend_match.group(1) if trend_match else 'Bilinmiyor'} 🚀📉"
+            elif matched_keyword == 'long':
+                long_match = re.search(r'Long Pozisyon:(.*?)(?:Short|$)', current_analysis, re.DOTALL)
+                response += f"\nLong: {long_match.group(1).strip() if long_match else 'Bilinmiyor'} 📈"
+            elif matched_keyword == 'short':
+                short_match = re.search(r'Short Pozisyon:(.*?)(?:Yorum|$)', current_analysis, re.DOTALL)
+                response += f"\nShort: {short_match.group(1).strip() if short_match else 'Bilinmiyor'} 📉"
+            elif matched_keyword == 'destek':
+                support_match = re.search(r'Destek: (.*?)(?:\n|$)', current_analysis, re.DOTALL)
+                response += f"\nDestek: {support_match.group(1) if support_match else 'Bilinmiyor'} 🛡️"
+            elif matched_keyword == 'direnç':
+                resistance_match = re.search(r'Direnç: (.*?)(?:\n|$)', current_analysis, re.DOTALL)
+                response += f"\nDirenç: {resistance_match.group(1) if resistance_match else 'Bilinmiyor'} 🏰"
+            elif matched_keyword in ['yorum', 'neden']:
+                comment_match = re.search(r'Yorum:(.*)', current_analysis, re.DOTALL)
+                response += f"\nYorum: {comment_match.group(1).strip() if comment_match else 'Bilinmiyor'} 💬"
+        else:
+            response += f"\nKanka, {symbol} için analiz yok. Hemen yapayım mı? (örn: {symbol} analiz) 😄"
         await update.message.reply_text(response)
         self.storage.save_conversation(chat_id, text, response, symbol)
+        return
 
-    async def split_and_send_message(self, chat_id, message, symbol):
-        """Mesajı 4096 karakter sınırına göre böl ve sırayla gönder."""
-        max_length = 4096
-        if not message or message.strip() == "":
-            response = f"Kanka, {symbol} için analiz üretemedim, veri eksik olabilir. 😕 Tekrar deneyeyim mi?"
-            await self.app.bot.send_message(chat_id=chat_id, text=response)
-            self.storage.save_conversation(chat_id, symbol, response, symbol)
-            return
+    response = await self.grok.generate_natural_response(text, context_info, symbol)
+    await update.message.reply_text(response)
+    self.storage.save_conversation(chat_id, text, response, symbol)
 
-        if len(message) <= max_length:
-            await self.app.bot.send_message(chat_id=chat_id, text=message)
-            self.storage.save_conversation(chat_id, symbol, message, symbol)
-            logger.info(f"Tek parça mesaj gönderildi: {message[:200]}...")
-            return
+async def split_and_send_message(self, chat_id, message, symbol):
+    """Mesajı 4096 karakter sınırına göre böl ve sırayla gönder."""
+    max_length = 4096
+    if not message or message.strip() == "":
+        response = f"Kanka, {symbol} için analiz üretemedim, veri eksik olabilir. 😕 Tekrar deneyeyim mi?"
+        await self.app.bot.send_message(chat_id=chat_id, text=response)
+        self.storage.save_conversation(chat_id, symbol, response, symbol)
+        return
 
-        sections = []
-        current_section = ""
-        lines = message.split('\n')
-        for line in lines:
-            if len(current_section) + len(line) + 1 > max_length:
-                sections.append(current_section.strip())
-                current_section = line + '\n'
-            else:
-                current_section += line + '\n'
-        if current_section:
+    if len(message) <= max_length:
+        await self.app.bot.send_message(chat_id=chat_id, text=message)
+        self.storage.save_conversation(chat_id, symbol, message, symbol)
+        logger.info(f"Tek parça mesaj gönderildi: {message[:200]}...")
+        return
+
+    sections = []
+    current_section = ""
+    lines = message.split('\n')
+    for line in lines:
+        if len(current_section) + len(line) + 1 > max_length:
             sections.append(current_section.strip())
+            current_section = line + '\n'
+        else:
+            current_section += line + '\n'
+    if current_section:
+        sections.append(current_section.strip())
 
-        for i, section in enumerate(sections, 1):
-            part_message = f"{symbol} Analiz - Bölüm {i}/{len(sections)} ⏰\n{section}"
-            await self.app.bot.send_message(chat_id=chat_id, text=part_message)
-            self.storage.save_conversation(chat_id, symbol, part_message, symbol)
-            logger.info(f"Mesaj bölümü {i}/{len(sections)} gönderildi: {part_message[:200]}...")
-            await asyncio.sleep(0.5)  # Telegram rate limit için kısa bekleme
+    for i, section in enumerate(sections, 1):
+        part_message = f"{symbol} Analiz - Bölüm {i}/{len(sections)} ⏰\n{section}"
+        await self.app.bot.send_message(chat_id=chat_id, text=part_message)
+        self.storage.save_conversation(chat_id, symbol, part_message, symbol)
+        logger.info(f"Mesaj bölümü {i}/{len(sections)} gönderildi: {part_message[:200]}...")
+        await asyncio.sleep(0.5)  # Telegram rate limit için kısa bekleme
 
-    async def process_coin(self, symbol, chat_id):
-        try:
-            data = await self.grok.fetch_market_data(symbol)
-            if not data or not any(data.get('klines', {}).get(interval, {}).get('data') for interval in TIMEFRAMES):
-                response = f"Kanka, {symbol} için veri bulamadım. Başka coin mi bakalım? 🤔"
-                await self.app.bot.send_message(chat_id=chat_id, text=response)
-                self.storage.save_conversation(chat_id, symbol, response, symbol)
-                return
-            data['indicators'] = calculate_indicators(data['klines'], data['order_book'], symbol)
-            data['grok_analysis'] = await self.grok.analyze_coin(symbol, chat_id)
-            message = data['grok_analysis']
-            await self.split_and_send_message(chat_id, message, symbol)
-            self.storage.save_analysis(symbol, data)
-            return data
-        except Exception as e:
-            logger.error(f"Error processing coin {symbol}: {e} 😞")
-            response = f"Kanka, {symbol} analizi yaparken bi’ şeyler ters gitti. Tekrar deneyelim mi? 😅"
+async def process_coin(self, symbol, chat_id):
+    """Coin analizi yap ve sonucu gönder."""
+    try:
+        data = await self.grok.fetch_market_data(symbol)
+        if not data or not any(data.get('klines', {}).get(interval, {}).get('data') for interval in TIMEFRAMES):
+            response = f"Kanka, {symbol} için veri bulamadım. Başka coin mi bakalım? 🤔"
             await self.app.bot.send_message(chat_id=chat_id, text=response)
             self.storage.save_conversation(chat_id, symbol, response, symbol)
             return
-        finally:
-            gc.collect()
 
-    async def run(self):
-        try:
-            logger.info("Starting application... 🚀")
-            self.is_running = True
-            await self.kucoin.initialize()
-            await self.app.initialize()
-            await self.app.start()
-            webhook_url = f"https://{os.getenv('HEROKU_APP_NAME')}.herokuapp.com/webhook"
-            current_webhook = await self.app.bot.get_webhook_info()
-            if current_webhook.url != webhook_url:
-                logger.info(f"Setting new webhook: {webhook_url}")
-                await self.app.bot.set_webhook(url=webhook_url)
-            else:
-                logger.info("Webhook already set, skipping... ✅")
-            web_app = web.Application()
-            web_app.router.add_post('/webhook', self.webhook_handler)
-            runner = web.AppRunner(web_app)
-            await runner.setup()
-            site = web.TCPSite(runner, '0.0.0.0', int(os.getenv('PORT', 8443)))
-            await site.start()
-            logger.info("Application started successfully 🎉")
-            await self.shutdown_event.wait()
-        except Exception as e:
-            logger.error(f"Error starting application: {e} 😞")
-        finally:
-            logger.info("Shutting down application... 🛑")
-            await self.kucoin.close()
-            if self.is_running:
-                try:
-                    await self.app.stop()
-                    await self.app.shutdown()
-                    logger.info("Webhook preserved to avoid re-setting ✅")
-                except Exception as e:
-                    logger.error(f"Error during shutdown: {e} 😞")
-                self.is_running = False
-            logger.info("Application shut down 🏁")
+        indicators = calculate_indicators(data['klines'], data['order_book'], symbol)
+        grok_analysis = await self.grok.analyze_coin(symbol, chat_id)
+        if not grok_analysis:
+            response = f"Kanka, {symbol} için analiz üretemedim, bi’ şeyler ters gitti. 😅 Tekrar deneyeyim mi?"
+            await self.app.bot.send_message(chat_id=chat_id, text=response)
+            self.storage.save_conversation(chat_id, symbol, response, symbol)
+            return
 
-    async def webhook_handler(self, request):
-        try:
-            raw_data = await request.json()
-            update = Update.de_json(raw_data, self.app.bot)
-            if update:
-                await self.app.process_update(update)
-            return web.Response(text="OK")
-        except Exception as e:
-            logger.error(f"Error handling webhook: {e} 😞")
-            return web.Response(text="Error", status=500)
+        await self.split_and_send_message(chat_id, grok_analysis, symbol)
+        self.storage.save_analysis(symbol, {'indicators': indicators, 'grok_analysis': grok_analysis})
+        logger.info(f"{symbol} için analiz tamamlandı ve gönderildi. 🚀")
+    except Exception as e:
+        logger.error(f"{symbol} için analiz sırasında hata: {e} 😞")
+        response = f"Kanka, {symbol} analizi yaparken bi’ hata oldu: {str(e)}. Tekrar deneyeyim mi? 😅"
+        await self.app.bot.send_message(chat_id=chat_id, text=response)
+        self.storage.save_conversation(chat_id, symbol, response, symbol)
+    finally:
+        gc.collect()
 
-def main():
-    bot = TelegramBot()
+async def run(self):
+    """Botu başlat ve webhook ayarla."""
+    try:
+        webhook_url = os.getenv('WEBHOOK_URL', f"https://mexctrading95bot-61a7539d22a7.herokuapp.com/{os.getenv('TELEGRAM_TOKEN')}")
+        logger.info(f"Setting webhook: {webhook_url}")
+        await self.app.bot.set_webhook(url=webhook_url)
+        port = int(os.environ.get('PORT', 8443))
+        app = web.Application()
+        app.router.add_post(f"/{os.getenv('TELEGRAM_TOKEN')}", self.handle_webhook)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', port)
+        await site.start()
+        logger.info(f"Bot running on port {port} with webhook {webhook_url} 🚀")
+        self.is_running = True
+        await self.shutdown_event.wait()
+    except Exception as e:
+        logger.error(f"Bot başlatma hatası: {e} 😞")
+    finally:
+        await self.kucoin.close()
+        if self.storage.conn and not self.storage.conn.closed:
+            self.storage.conn.close()
+        logger.info("Bot durduruldu. 🛑")
+        gc.collect()
 
-    def handle_sigterm(*args):
-        logger.info("Received SIGTERM, shutting down... 🛑")
-        bot.shutdown_event.set()
+async def handle_webhook(self, request):
+    """Webhook isteklerini işle."""
+    try:
+        update = await request.json()
+        update = Update.de_json(update, self.app.bot)
+        await self.app.process_update(update)
+        return web.Response(status=200)
+    except Exception as e:
+        logger.error(f"Webhook işleme hatası: {e} 😞")
+        return web.Response(status=500)
 
-    signal.signal(signal.SIGTERM, handle_sigterm)
-    asyncio.run(bot.run())
+def signal_handler(self, signum, frame):
+    """Sinyal yakalayıcı."""
+    logger.info(f"Sinyal alındı: {signum}, bot durduruluyor...")
+    self.shutdown_event.set()
+
+def __del__(self):
+    """Bot kaynaklarını temizle."""
+    try:
+        if self.storage.conn and not self.storage.conn.closed:
+            self.storage.conn.close()
+        logger.info("Bot kaynakları temizlendi. 🧹")
+    except Exception as e:
+        logger.error(f"Bot temizleme hatası: {e} 😞")
+    finally:
+        gc.collect()
 
 if __name__ == "__main__":
-    main()
+    bot = TelegramBot()
+    signal.signal(signal.SIGINT, bot.signal_handler)
+    signal.signal(signal.SIGTERM, bot.signal_handler)
+    asyncio.run(bot.run())
