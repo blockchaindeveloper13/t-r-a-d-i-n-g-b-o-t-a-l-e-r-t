@@ -1053,7 +1053,7 @@ def calculate_indicators(kline_data, order_book, symbol):
                 ].min(axis=1)
 
             last_row = df.iloc[-1]
-            indicatorsбайтаf"raw_data_{interval}"] = {
+            indicators[f"raw_data_{interval}"] = {
                 "high": (
                     float(last_row["high"]) if pd.notnull(last_row["high"]) else 0.0
                 ),
