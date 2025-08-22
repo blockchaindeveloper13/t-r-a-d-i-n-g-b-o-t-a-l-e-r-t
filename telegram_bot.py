@@ -1263,31 +1263,35 @@ class TelegramBot:
             gc.collect()
 
     async def run(self):
-        """Botu başlat ve webhook ayarla."""
-        try:
-            webhook_url = os.getenv('WEBHOOK_URL', f"https://mexctrading95bot-61a7539d22a7.herokuapp.com/{os.getenv('TELEGRAM_TOKEN')}")
-            logger.info(f"Setting webhook: {webhook_url}")
-            await self.app.bot.set_webhook(url=webhook_url)
-            port = int(os.environ.get('PORT', 8443))
-            app = web.Application()
-            app.router.add_post(f"/{os.getenv('TELEGRAM_TOKEN')}", self.handle_webhook)
-            app.router.add_get("/", self.health_check)  # Sağlık kontrolü için
-            logger.info(f"Registered routes: {app.router.routes()}")
-            runner = web.AppRunner(app)
-            await runner.setup()
-            site = web.TCPSite(runner, '0.0.0.0', port)
-            await site.start()
-            logger.info(f"Bot running on port {port} with webhook {webhook_url} 🚀")
-            self.is_running = True
-            await self.shutdown_event.wait()
-        except Exception as e:
-            logger.error(f"Bot başlatma hatası: {e} 😞")
-        finally:
-            await self.kucoin.close()
-            if self.storage.conn and not self.storage.conn.closed:
-                self.storage.conn.close()
-            logger.info("Bot durduruldu. 🛑")
-            gc.collect()
+    """Botu başlat ve webhook ayarla."""
+    try:
+        app_name = os.getenv('HEROKU_APP_NAME', 't-r-a-d-i-n-g-b-o-t-a-l-e-r-t-15aeeb4b3565')
+        webhook_url = f"https://{app_name}.herokuapp.com/{os.getenv('TELEGRAM_TOKEN')}"
+        logger.info(f"Setting webhook: {webhook_url}")
+        await self.app.bot.set_webhook(url=webhook_url)
+        port = int(os.environ.get('PORT', 8443))
+        app = web.Application()
+        app.router.add_post(f"/{os.getenv('TELEGRAM_TOKEN')}", self.handle_webhook)
+        app.router.add_get("/", self.health_check)  # Sağlık kontrolü için
+        logger.info(f"Registered routes: {app.router.routes()}")
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', port)
+        await site.start()
+        logger.info(f"Bot running on port {port} with webhook {webhook_url} 🚀")
+        self.is_running = True
+        await self.shutdown_event.wait()
+    except Exception as e:
+        logger.error(f"Bot başlatma hatası: {e} 😞")
+    finally:
+        logger.info("Bot kapanıyor, kaynaklar temizleniyor... 🛑")
+        await self.app.shutdown()
+        await self.app.cleanup()
+        await self.kucoin.close()
+        if self.storage.conn and not self.storage.conn.closed:
+            self.storage.conn.close()
+        logger.info("Bot durduruldu. 🛑")
+        gc.collect()
 
     async def handle_webhook(self, request):
         """Webhook isteklerini işle."""
