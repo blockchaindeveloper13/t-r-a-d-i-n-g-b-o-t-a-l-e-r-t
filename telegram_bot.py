@@ -1280,17 +1280,17 @@ class TelegramBot:
             logger.info(f"Bot running on port {port} with webhook {webhook_url} 🚀")
             self.is_running = True
             await self.shutdown_event.wait()
-    except Exception as e:
-        logger.error(f"Bot başlatma hatası: {e} 😞")
-    finally:
-        logger.info("Bot kapanıyor, kaynaklar temizleniyor... 🛑")
-        await self.app.shutdown()
-        await self.app.cleanup()
-        await self.kucoin.close()
-        if self.storage.conn and not self.storage.conn.closed:
-            self.storage.conn.close()
-        logger.info("Bot durduruldu. 🛑")
-        gc.collect()
+        except Exception as e:
+            logger.error(f"Bot başlatma hatası: {e} 😞")
+        finally:
+            logger.info("Bot kapanıyor, kaynaklar temizleniyor... 🛑")
+            await self.app.shutdown()
+            await self.app.cleanup()
+            await self.kucoin.close()
+            if self.storage.conn and not self.storage.conn.closed:
+                self.storage.conn.close()
+            logger.info("Bot durduruldu. 🛑")
+            gc.collect()
 
     async def handle_webhook(self, request):
         """Webhook isteklerini işle."""
